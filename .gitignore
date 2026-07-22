@@ -16,3 +16,8 @@ Thumbs.db
 
 # Office temp lock files
 ~$*.xlsx
+
+# Data and generated artifacts
+*.xlsx
+*.csv
+*.png
