@@ -13,3 +13,6 @@ env/
 # OS/editor files
 .DS_Store
 Thumbs.db
+
+# Office temp lock files
+~$*.xlsx
