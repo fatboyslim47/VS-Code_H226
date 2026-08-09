@@ -11,6 +11,8 @@ import re
 import math
 import calendar
 import io
+import shutil
+import subprocess
 from pathlib import Path
 
 # Third-party imports
@@ -21,6 +23,78 @@ import matplotlib.image as mpimg
 
 # Set to True only when you want to regenerate the summary vertical bar chart.
 GENERATE_VERTICAL_BAR_CHART = False
+
+# Set to True to automatically render the Quarto HTML report after script output.
+AUTO_RENDER_QMD_REPORT = True
+
+# Merge historical task IDs into active task IDs before aggregation.
+TASK_ID_MERGE_MAP = {
+    91971495: 92739080,
+}
+
+
+def resolve_quarto_executable() -> str | None:
+    """Return a usable Quarto executable path, or None if not found."""
+    quarto_on_path = shutil.which('quarto')
+    if quarto_on_path:
+        return quarto_on_path
+
+    default_windows_quarto = Path('C:/Users/mwoodmansee/AppData/Local/Programs/Quarto/bin/quarto.exe')
+    if default_windows_quarto.exists():
+        return str(default_windows_quarto)
+
+    return None
+
+
+def render_qmd_report(script_dir: Path) -> None:
+    """Render the task sparkline QMD report into the output folder."""
+    qmd_file = script_dir / 'task_sparkline_landscape_report.qmd'
+    if not qmd_file.exists():
+        print(f"Quarto report file not found, skipping render: {qmd_file}")
+        return
+
+    quarto_executable = resolve_quarto_executable()
+    if not quarto_executable:
+        print('Quarto executable not found. Skipping HTML render step.')
+        return
+
+    output_dir = script_dir / 'output'
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    render_cmd = [
+        quarto_executable,
+        'render',
+        str(qmd_file),
+        '--to',
+        'html',
+        '--output',
+        'task_sparkline_landscape_report.html',
+        '--output-dir',
+        str(output_dir),
+    ]
+
+    print('\nRendering Quarto HTML report...')
+    try:
+        subprocess.run(render_cmd, check=True, cwd=str(script_dir))
+        print(f"HTML report saved to: {output_dir / 'task_sparkline_landscape_report.html'}")
+    except subprocess.CalledProcessError as error:
+        print(f"Quarto render failed with exit code {error.returncode}.")
+
+
+def cleanup_stale_task_images(script_dir: Path, latest_revision: int, keep_task_ids: list[int]) -> None:
+    """Delete task sparkline PNGs for the current revision that are no longer in scope."""
+    keep_set = set(int(task_id) for task_id in keep_task_ids)
+    pattern = re.compile(r'^task_(\d+)_employee_sparklines_rev(\d+)\.png$', re.IGNORECASE)
+
+    for image_file in script_dir.glob('task_*_employee_sparklines_rev*.png'):
+        match = pattern.match(image_file.name)
+        if not match:
+            continue
+        image_task_id = int(match.group(1))
+        image_revision = int(match.group(2))
+        if image_revision == latest_revision and image_task_id not in keep_set:
+            image_file.unlink(missing_ok=True)
+            print(f"Removed stale task sparkline image: {image_file}")
 
 
 def format_month_label(value: str) -> str:
@@ -211,10 +285,17 @@ def create_entity_employee_sparkline_plots(
         axes[-1].set_xticks(range(len(month_labels)))
         axes[-1].set_xticklabels(month_display_labels, rotation=45, ha='right', fontsize=8)
 
-        if str(title_prefix) == str(entity_name):
-            sparkline_title = f'{title_prefix}'
+        if str(title_entity_label).lower() == 'task':
+            # Ensure task plots are titled as: Project, Task Name, then Task ID.
+            if str(title_prefix) and str(title_prefix) != str(entity_name):
+                sparkline_title = f'{title_prefix} | {entity_name} | Task ID {entity_id}'
+            else:
+                sparkline_title = f'{entity_name} | Task ID {entity_id}'
         else:
-            sparkline_title = f'{title_prefix} | {entity_name}'
+            if str(title_prefix) == str(entity_name):
+                sparkline_title = f'{title_prefix}'
+            else:
+                sparkline_title = f'{title_prefix} | {entity_name}'
 
         fig.suptitle(
             sparkline_title,
@@ -224,6 +305,10 @@ def create_entity_employee_sparkline_plots(
         plt.tight_layout(rect=[0.16, 0, 1, 0.95])
 
         image_label = f'{output_prefix}_{entity_id}_employee_sparklines_rev{latest_revision}'
+        image_file = script_dir / f'{image_label}.png'
+        fig.savefig(image_file, format='png', dpi=300, bbox_inches='tight')
+        print(f"Saved sparkline image: {image_file}")
+
         buffer = io.BytesIO()
         fig.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
         buffer.seek(0)
@@ -305,6 +390,35 @@ else:
     # Remove rows with missing values in key columns
     dropna_subset = ['Month', 'Task Id', 'Task', 'Project Id', 'Project', 'Hours (h)'] + ([employee_col] if employee_col else [])
     df_curated = df_curated.dropna(subset=dropna_subset)
+
+    # Merge legacy Task IDs into active Task IDs so reporting rolls into one task.
+    if TASK_ID_MERGE_MAP:
+        task_name_by_id = (
+            df_curated[['Task Id', 'Task']]
+            .drop_duplicates(subset=['Task Id'])
+            .set_index('Task Id')['Task']
+            .to_dict()
+        )
+        task_project_by_id = (
+            df_curated[['Task Id', 'Project Id', 'Project']]
+            .drop_duplicates(subset=['Task Id'])
+            .set_index('Task Id')[['Project Id', 'Project']]
+            .to_dict('index')
+        )
+        df_curated['Task Id'] = df_curated['Task Id'].astype(int)
+        for old_task_id, new_task_id in TASK_ID_MERGE_MAP.items():
+            old_rows = df_curated['Task Id'] == old_task_id
+            if old_rows.any():
+                df_curated.loc[old_rows, 'Task Id'] = new_task_id
+                replacement_name = task_name_by_id.get(new_task_id)
+                if replacement_name:
+                    df_curated.loc[df_curated['Task Id'] == new_task_id, 'Task'] = replacement_name
+
+                replacement_project = task_project_by_id.get(new_task_id)
+                if replacement_project:
+                    df_curated.loc[df_curated['Task Id'] == new_task_id, 'Project Id'] = replacement_project['Project Id']
+                    df_curated.loc[df_curated['Task Id'] == new_task_id, 'Project'] = replacement_project['Project']
+                print(f"Merged Task ID {old_task_id} into Task ID {new_task_id}")
     
     # Group by Month, Task, and Project, summing the hours
     df_grouped = df_curated.groupby(['Month', 'Task Id', 'Task', 'Project Id', 'Project'])['Hours (h)'].sum().reset_index()
@@ -320,7 +434,7 @@ else:
     # -----------------------------------------------------------------------
 
     # Filter to specific Task Ids
-    specific_task_ids = [66391038, 94452732, 82982100, 91971495, 92780832, 94453589, 94279175, 92739080, 93076386]
+    specific_task_ids = [66391038, 94452732, 82982100, 92780832, 94453589, 94279175, 92739080, 93076386]
     df_filtered = df_grouped[df_grouped['Task Id'].isin(specific_task_ids)].copy()
     
     print(f"\nFiltered data summary (specific Task Ids):")
@@ -361,6 +475,11 @@ else:
             latest_revision=latest_revision,
             output_prefix='all_task',
             compilation_title='Employee Sparkline Compilation - All Tasks',
+        )
+        cleanup_stale_task_images(
+            script_dir=script_dir,
+            latest_revision=latest_revision,
+            keep_task_ids=specific_task_ids,
         )
 
     # -----------------------------------------------------------------------
@@ -450,3 +569,6 @@ else:
     output_csv = script_dir / f'hours_by_month_data_rev{latest_revision}.csv'
     df_filtered.to_csv(output_csv, index=False)
     print(f"Curated data saved to: {output_csv}")
+
+    if AUTO_RENDER_QMD_REPORT:
+        render_qmd_report(script_dir)
