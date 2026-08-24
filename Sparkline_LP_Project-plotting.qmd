@@ -1,0 +1,384 @@
+---
+title: "LiquidPlanner Project Sparklines"
+format:
+    html:
+        embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+<style>
+    .project-page {
+        page-break-after: always;
+        break-after: page;
+        margin: 0;
+        padding: 0;
+    }
+
+    .project-page:last-child {
+        page-break-after: auto;
+        break-after: auto;
+    }
+
+    .project-page h2 {
+        margin: 0 0 0.4rem 0;
+    }
+
+    .back-to-toc {
+        margin: 0.4rem 0 0 0;
+        font-size: 0.9rem;
+    }
+
+    .project-page img {
+        width: 100%;
+        height: auto;
+        max-height: calc(100vh - 120px);
+        object-fit: contain;
+    }
+
+    .toc {
+        margin: 0 0 1rem 0;
+        padding: 0.75rem 1rem;
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        background: #f8fafc;
+    }
+
+    .toc h2 {
+        margin: 0 0 0.5rem 0;
+        font-size: 1.1rem;
+    }
+
+    .toc ul {
+        margin: 0;
+        padding-left: 1.25rem;
+    }
+
+    .report-page {
+        page-break-after: always;
+        break-after: page;
+        position: relative;
+        padding-bottom: 1.1rem;
+    }
+
+    .report-page img {
+        display: block;
+        width: min(100%, 1100px);
+        height: auto;
+        max-height: calc(100vh - 150px);
+        object-fit: contain;
+        margin: 0 auto;
+    }
+
+    @media print {
+        @page {
+            size: landscape;
+            margin: 0.5in;
+        }
+
+    }
+</style>
+
+```{python}
+from pathlib import Path
+import re
+import csv
+import html
+import os
+from glob import glob
+from IPython.display import HTML, display
+
+script_dir = Path(".").resolve()
+pattern = re.compile(r"^project_(\d+)_employee_sparklines_rev(\d+)\.png$", re.IGNORECASE)
+
+# Project 66389248 aggregates multiple tasks; its breakdown charts are rendered
+# directly below its own project page.
+TASK_BREAKDOWN_PROJECT_ID = 66389248
+task_pattern = re.compile(r"^task_(\d+)_employee_sparklines_rev(\d+)\.png$", re.IGNORECASE)
+
+requested_project_ids = [
+    88341467,
+    84929307,
+    83437623,
+    93076382,
+    92781007,
+    94279174,
+    92781028,
+    92723243,
+    66389248,
+    93159133,
+    92777746,
+    94279211,
+    92723205,
+    82757598,
+    83466138,
+    52104089,
+    92781049,
+    93176164,
+    94469212,
+    94696184,
+]
+
+# The Python producer applies the final Support-hours ordering used by the PDF.
+report_project_ids = requested_project_ids.copy()
+
+project_reference_rows = [
+    {"Category": "ADMIN", "Project": "ABSENT, FLEXTIME, HOLIDAY", "Code": "ABS", "Project Id": 88341467},
+    {"Category": "ADMIN", "Project": "TRAINING", "Code": "TRN", "Project Id": 84929307},
+    {"Category": "ADMIN", "Project": "ENGINEERING MANAGEMENT", "Code": "ENGM", "Project Id": 83437623},
+    {"Category": "NPD", "Project": "CPS G5 AUSTRALIA", "Code": "R&DO", "Project Id": 93076382},
+    {"Category": "NPD", "Project": "CPS GEN5 IEEE 2800", "Code": "R&DG", "Project Id": 92781007},
+    {"Category": "NPD", "Project": "CPS G5.1", "Code": "R&DA", "Project Id": 94279174},
+    {"Category": "NPD", "Project": "DPS PV", "Code": "R&DZ", "Project Id": 92781028},
+    {"Category": "NPD", "Project": "150KW ISOLATED DC/DC - DAB", "Code": "R&DN", "Project Id": 92723243},
+    {"Category": "SUPPORT", "Project": "PRODUCT LINE", "Code": "--", "Project Id": 66389248},
+    {"Category": "SUPPORT", "Project": "ERCOT MODELING", "Code": "CPS5", "Project Id": 93159133},
+    {"Category": "SUPPORT", "Project": "CPS GEN5 2ND SOURCING", "Code": "R&D4", "Project Id": 92777746},
+    {"Category": "SUPPORT", "Project": "AI EMULATOR", "Code": "R&DF", "Project Id": 94279211},
+    {"Category": "SUPPORT", "Project": "EMT MODELING", "Code": "R&DB", "Project Id": 92723205},
+    {"Category": "SUPPORT", "Project": "CPS GEN5 SALT FOG FILTER", "Code": "R&DE", "Project Id": 82757598},
+    {"Category": "SUPPORT", "Project": "DSP CONTROLLER", "Code": "R&DM", "Project Id": 83466138},
+    {"Category": "SUPPORT", "Project": "DPS-1000 OPTIONS", "Code": "R&DV", "Project Id": 52104089},
+    {"Category": "SUPPORT", "Project": "DPS1000 2ND SOURCING", "Code": "R&DJ", "Project Id": 92781049},
+    {"Category": "SUPPORT", "Project": "MEDIUM LEVEL CONTROLLER", "Code": "--", "Project Id": 93176164},
+    {"Category": "FIELD SVC", "Project": "ENGINEERING SUPPORT", "Code": "--", "Project Id": 94469212},
+    {"Category": "FIELD SVC", "Project": "532034*001 | VOLTIFY INC | INV-CPS-S--FLDSRVC | 149452", "Code": "--", "Project Id": 94696184},
+]
+project_reference_by_id = {row["Project Id"]: row for row in project_reference_rows}
+
+env_report_root = os.getenv("LP_REPORT_ROOT", "").strip()
+search_dirs = []
+if env_report_root:
+    search_dirs.append(Path(env_report_root).resolve())
+search_dirs.extend([script_dir, script_dir.parent])
+asset_dir = None
+matches = []
+for candidate_dir in search_dirs:
+    candidate_matches = []
+    for image_file in candidate_dir.glob("project_*_employee_sparklines_rev*.png"):
+        match = pattern.match(image_file.name)
+        if match:
+            project_id = int(match.group(1))
+            revision = int(match.group(2))
+            candidate_matches.append((revision, project_id, image_file))
+    if candidate_matches:
+        asset_dir = candidate_dir
+        matches = candidate_matches
+        break
+
+if not matches:
+    display(HTML(
+        "No project sparkline PNG files were found in this folder. "
+        "Run Sparkline_LP_Project-plotting.py first."
+    ))
+else:
+    latest_revision = max(revision for revision, _, _ in matches)
+    latest_revision_images = [
+        (project_id, image_file)
+        for revision, project_id, image_file in matches
+        if revision == latest_revision
+    ]
+    project_image_by_id = {project_id: image_file for project_id, image_file in latest_revision_images}
+
+    # Resolve project names from the latest curated CSV so labels match plot titles.
+    project_name_by_id = {}
+    project_total_hours_by_id = {}
+    available_project_ids = set()
+    latest_csv = (asset_dir or script_dir) / f"hours_by_month_project_data_rev{latest_revision}.csv"
+    if latest_csv.exists():
+        with latest_csv.open("r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            for row in reader:
+                try:
+                    project_id = int(float(row.get("Project Id", "")))
+                except (TypeError, ValueError):
+                    continue
+                available_project_ids.add(project_id)
+                project_name = str(row.get("Project", "")).strip()
+                if project_name and project_id not in project_name_by_id:
+                    project_name_by_id[project_id] = project_name
+                try:
+                    hours_value = float(row.get("Hours (h)", "0"))
+                except (TypeError, ValueError):
+                    hours_value = 0.0
+                project_total_hours_by_id[project_id] = project_total_hours_by_id.get(project_id, 0.0) + hours_value
+
+    # Backfill names for missing IDs using older project data revisions when available.
+    csv_glob = str((asset_dir or script_dir) / "hours_by_month_project_data_rev*.csv")
+    historical_csvs = sorted(glob(csv_glob), reverse=True)
+    for historical_csv_path in historical_csvs:
+        with open(historical_csv_path, "r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            for row in reader:
+                try:
+                    project_id = int(float(row.get("Project Id", "")))
+                except (TypeError, ValueError):
+                    continue
+                if project_id in project_name_by_id:
+                    continue
+                project_name = str(row.get("Project", "")).strip()
+                if project_name:
+                    project_name_by_id[project_id] = project_name
+
+    missing_project_ids = sorted(set(requested_project_ids) - available_project_ids)
+
+    # Keep Support projects together and order them by descending total hours.
+    report_project_ids = []
+    for category in ['ADMIN', 'NPD', 'SUPPORT', 'FIELD SVC']:
+        category_project_ids = [
+            project_id for project_id in requested_project_ids
+            if project_reference_by_id.get(project_id, {}).get('Category') == category
+        ]
+        category_project_ids.sort(
+            key=lambda project_id: project_total_hours_by_id.get(project_id, 0.0),
+            reverse=True,
+        )
+        report_project_ids.extend(category_project_ids)
+
+    # Discover the Task Id breakdown images/names for the rollup project.
+    task_image_by_id = {}
+    for image_file in (asset_dir or script_dir).glob("task_*_employee_sparklines_rev*.png"):
+        task_match = task_pattern.match(image_file.name)
+        if task_match and int(task_match.group(2)) == latest_revision:
+            task_image_by_id[int(task_match.group(1))] = image_file
+
+    task_name_by_id = {}
+    task_total_hours_by_id = {}
+    task_csv = (asset_dir or script_dir) / f"task_hours_by_month_data_rev{latest_revision}.csv"
+    if task_csv.exists():
+        with task_csv.open("r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            for row in reader:
+                try:
+                    task_id = int(float(row.get("Task Id", "")))
+                except (TypeError, ValueError):
+                    continue
+                task_name = str(row.get("Task", "")).strip()
+                if task_name and task_id not in task_name_by_id:
+                    task_name_by_id[task_id] = task_name
+                try:
+                    hours_value = float(row.get("Hours (h)", "0"))
+                except (TypeError, ValueError):
+                    hours_value = 0.0
+                task_total_hours_by_id[task_id] = task_total_hours_by_id.get(task_id, 0.0) + hours_value
+
+    # Highest total hours (across all employees/months) first, lowest last.
+    ordered_task_ids = sorted(
+        task_image_by_id.keys(),
+        key=lambda task_id: task_total_hours_by_id.get(task_id, 0.0),
+        reverse=True,
+    )
+
+    # Keep report order aligned to the requested ID sequence (Project 66389248 last) and skip IDs with no data/image.
+    latest_project_images = [
+        (project_id, project_image_by_id[project_id])
+        for project_id in report_project_ids
+        if project_id in project_image_by_id and (not project_name_by_id or project_id in project_name_by_id)
+    ]
+
+    def project_label(project_id: int) -> str:
+        project_name = project_name_by_id.get(project_id) or project_reference_by_id.get(project_id, {}).get("Project", "Unknown Project")
+        project_total = project_total_hours_by_id.get(project_id, 0.0)
+        return f"{project_name} | Project ID {project_id} | Total: {project_total:.1f}h"
+
+    toc_items = [
+        f"<li><a href='#project-{project_id}'>{html.escape(project_label(project_id))}</a></li>"
+        for project_id, _ in latest_project_images
+    ]
+
+    html_parts = [
+        f"<p>Using project sparkline images from revision {latest_revision}.</p>",
+    ]
+
+    category_chart_specs = [
+        (f"category_hours_by_month_rev{latest_revision}.png", "Monthly Hours by Category"),
+        (f"category_percent_by_month_rev{latest_revision}.png", "Monthly Category Share (100% Stacked)"),
+    ]
+    for chart_file_name, chart_title in category_chart_specs:
+        chart_file = (asset_dir or script_dir) / chart_file_name
+        if chart_file.exists():
+            chart_src = os.path.relpath(str(chart_file), start=str(script_dir)).replace('\\', '/')
+            html_parts.extend([
+                "<section class='report-page'>",
+                f"<h2>{html.escape(chart_title)}</h2>",
+                f"<img src='{chart_src}' alt='{html.escape(chart_title)}'>",
+                "</section>",
+            ])
+
+    reference_rows_html = "".join(
+        (
+            "<tr>"
+            f"<td>{html.escape(str(row['Category']))}</td>"
+            f"<td>{html.escape(str(row['Project']))}</td>"
+            f"<td>{html.escape(str(row['Code']))}</td>"
+            f"<td>{row['Project Id']}</td>"
+            "</tr>"
+        )
+        for row in project_reference_rows
+    )
+    html_parts.extend([
+        "<section class='toc report-page'>",
+        "<h2>Clean Energy Systems and R&amp;D | Project Time Allocation</h2>",
+        "<table>",
+        "<thead><tr><th>Category</th><th>Project</th><th>Code</th><th>Project ID</th></tr></thead>",
+        f"<tbody>{reference_rows_html}</tbody>",
+        "</table>",
+        "</section>",
+    ])
+
+    if missing_project_ids:
+        missing_list_items = "".join(
+            f"<li>{html.escape(project_name_by_id.get(project_id) or project_reference_by_id.get(project_id, {}).get('Project', 'Unknown Project'))} | Project ID {project_id}</li>"
+            for project_id in missing_project_ids
+        )
+        html_parts.extend([
+            "<section class='toc report-page'>",
+            "<h2>Missing Project IDs (No Data in Latest Revision)</h2>",
+            f"<ul>{missing_list_items}</ul>",
+            "</section>",
+        ])
+
+    html_parts.extend([
+        "<nav class='toc report-page' id='project-toc'>",
+        "<h2>Project Table of Contents</h2>",
+        "<ul>",
+        *toc_items,
+        "</ul>",
+        "</nav>",
+    ])
+
+    for project_id, image_file in latest_project_images:
+        label = html.escape(project_label(project_id))
+        image_src = os.path.relpath(str(image_file), start=str(script_dir)).replace('\\', '/')
+        html_parts.append(
+            """
+<section class='project-page' id='project-{project_id}'>
+  <h2>{label}</h2>
+  <img src='{image_src}' alt='Project ID {project_id} sparkline'>
+    <p class='back-to-toc'><a href='#project-toc'>Back to TOC</a></p>
+</section>
+""".strip().format(project_id=project_id, image_src=image_src, label=label)
+        )
+
+        if project_id == TASK_BREAKDOWN_PROJECT_ID:
+            for task_id in ordered_task_ids:
+                task_image_file = task_image_by_id[task_id]
+                task_total = task_total_hours_by_id.get(task_id, 0.0)
+                task_label = html.escape(
+                    f"{task_name_by_id.get(task_id, 'Unknown Task')} | Task ID {task_id} | Total: {task_total:.1f}h"
+                )
+                task_image_src = os.path.relpath(str(task_image_file), start=str(script_dir)).replace('\\', '/')
+                html_parts.append(
+                    """
+<section class='project-page' id='task-{task_id}'>
+  <h2>{task_label}</h2>
+  <img src='{task_image_src}' alt='Task ID {task_id} sparkline'>
+    <p class='back-to-toc'><a href='#project-toc'>Back to TOC</a></p>
+</section>
+""".strip().format(task_id=task_id, task_image_src=task_image_src, task_label=task_label)
+                )
+
+    display(HTML("\n".join(html_parts)))
+```
