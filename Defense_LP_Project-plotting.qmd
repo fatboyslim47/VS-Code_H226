@@ -1,5 +1,5 @@
 ---
-title: "LiquidPlanner Project Sparklines"
+title: "Defense LiquidPlanner Project Sparklines"
 format:
     html:
         embed-resources: true
@@ -108,60 +108,34 @@ report_prefix = os.getenv("LP_REPORT_PREFIX", "").strip()
 executed_at = os.getenv("LP_REPORT_EXECUTED_AT", "").strip() or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 asset_prefix = f"{report_prefix}_" if report_prefix else ""
 pattern = re.compile(rf"^{re.escape(asset_prefix)}project_(\d+)_employee_sparklines_rev(\d+)\.png$", re.IGNORECASE)
+MIN_REPORT_PROJECT_HOURS = 10.0
+ADMIN_PROJECT_IDS = {
+    58589966,
+    57916280,
+    57916278,
+    58068435,
+    61538760,
+    57916281,
+}
+SUPPORT_PROJECT_IDS = {
+    66389248,
+    75709273,
+    57163983,
+    51842049,
+    75709167,
+    52104089,
+}
 
-# Project 66389248 aggregates multiple tasks; its breakdown charts are rendered
-# directly below its own project page.
-TASK_BREAKDOWN_PROJECT_ID = 66389248
+# No Defense task-level breakdown project has been selected yet.
+TASK_BREAKDOWN_PROJECT_ID = None
 task_pattern = re.compile(rf"^{re.escape(asset_prefix)}task_(\d+)_employee_sparklines_rev(\d+)\.png$", re.IGNORECASE)
 
-requested_project_ids = [
-    88341467,
-    84929307,
-    83437623,
-    93076382,
-    92781007,
-    94279174,
-    92781028,
-    92723243,
-    66389248,
-    93159133,
-    92777746,
-    94279211,
-    92723205,
-    82757598,
-    83466138,
-    52104089,
-    92781049,
-    93176164,
-    94469212,
-    94696184,
-]
+requested_project_ids = []
 
-# The Python producer applies the final Support-hours ordering used by the PDF.
+# The Python producer applies the final descending-hours ordering used by the PDF.
 report_project_ids = requested_project_ids.copy()
 
-project_reference_rows = [
-    {"Category": "ADMIN", "Project": "ABSENT, FLEXTIME, HOLIDAY", "Code": "ABS", "Project Id": 88341467},
-    {"Category": "ADMIN", "Project": "TRAINING", "Code": "TRN", "Project Id": 84929307},
-    {"Category": "ADMIN", "Project": "ENGINEERING MANAGEMENT", "Code": "ENGM", "Project Id": 83437623},
-    {"Category": "NPD", "Project": "CPS G5 AUSTRALIA", "Code": "R&DO", "Project Id": 93076382},
-    {"Category": "NPD", "Project": "CPS GEN5 IEEE 2800", "Code": "R&DG", "Project Id": 92781007},
-    {"Category": "NPD", "Project": "CPS G5.1", "Code": "R&DA", "Project Id": 94279174},
-    {"Category": "NPD", "Project": "DPS PV", "Code": "R&DZ", "Project Id": 92781028},
-    {"Category": "NPD", "Project": "150KW ISOLATED DC/DC - DAB", "Code": "R&DN", "Project Id": 92723243},
-    {"Category": "SUPPORT", "Project": "PRODUCT LINE", "Code": "--", "Project Id": 66389248},
-    {"Category": "SUPPORT", "Project": "ERCOT MODELING", "Code": "CPS5", "Project Id": 93159133},
-    {"Category": "SUPPORT", "Project": "CPS GEN5 2ND SOURCING", "Code": "R&D4", "Project Id": 92777746},
-    {"Category": "SUPPORT", "Project": "AI EMULATOR", "Code": "R&DF", "Project Id": 94279211},
-    {"Category": "SUPPORT", "Project": "EMT MODELING", "Code": "R&DB", "Project Id": 92723205},
-    {"Category": "SUPPORT", "Project": "CPS GEN5 SALT FOG FILTER", "Code": "R&DE", "Project Id": 82757598},
-    {"Category": "SUPPORT", "Project": "DSP CONTROLLER", "Code": "R&DM", "Project Id": 83466138},
-    {"Category": "SUPPORT", "Project": "DPS-1000 OPTIONS", "Code": "R&DV", "Project Id": 52104089},
-    {"Category": "SUPPORT", "Project": "DPS1000 2ND SOURCING", "Code": "R&DJ", "Project Id": 92781049},
-    {"Category": "SUPPORT", "Project": "MEDIUM LEVEL CONTROLLER", "Code": "--", "Project Id": 93176164},
-    {"Category": "FIELD SVC", "Project": "ENGINEERING SUPPORT", "Code": "--", "Project Id": 94469212},
-    {"Category": "FIELD SVC", "Project": "532034*001 | VOLTIFY INC | INV-CPS-S--FLDSRVC | 149452", "Code": "--", "Project Id": 94696184},
-]
+project_reference_rows = []
 project_reference_by_id = {row["Project Id"]: row for row in project_reference_rows}
 
 env_report_root = os.getenv("LP_REPORT_ROOT", "").strip()
@@ -187,7 +161,7 @@ for candidate_dir in search_dirs:
 if not matches:
     display(HTML(
         "No project sparkline PNG files were found in this folder. "
-        "Run Sparkline_LP_Project-plotting.py first."
+        "Run Defense_LP_Project-plotting.py first."
     ))
 else:
     latest_revision = max(revision for revision, _, _ in matches)
@@ -227,6 +201,21 @@ else:
     project_name_by_id, project_total_hours_by_id, available_project_ids = read_entity_csv(
         latest_csv, "Project Id", "Project"
     )
+    requested_project_ids = sorted(available_project_ids)
+    project_reference_rows = [
+        {
+            "Category": (
+                "ADMIN" if project_id in ADMIN_PROJECT_IDS
+                else "SUPPORT" if project_id in SUPPORT_PROJECT_IDS
+                else "NRE"
+            ),
+            "Project": project_name_by_id.get(project_id, "Unknown Project"),
+            "Code": "--",
+            "Project Id": project_id,
+        }
+        for project_id in requested_project_ids
+    ]
+    project_reference_by_id = {row["Project Id"]: row for row in project_reference_rows}
 
     # Backfill names for missing IDs using older project data revisions when available.
     csv_glob = str((asset_dir or script_dir) / f"{asset_prefix}hours_by_month_project_data_rev*.csv")
@@ -247,12 +236,15 @@ else:
 
     missing_project_ids = sorted(set(requested_project_ids) - available_project_ids)
 
-    # Keep Support projects together and order them by descending total hours.
+    # Order discovered Defense projects by descending total hours.
     report_project_ids = []
-    for category in ['ADMIN', 'NPD', 'SUPPORT', 'FIELD SVC']:
+    for category in ['ADMIN', 'NRE', 'SUPPORT']:
         category_project_ids = [
             project_id for project_id in requested_project_ids
-            if project_reference_by_id.get(project_id, {}).get('Category') == category
+            if (
+                project_reference_by_id.get(project_id, {}).get('Category') == category
+                and project_total_hours_by_id.get(project_id, 0.0) >= MIN_REPORT_PROJECT_HOURS
+            )
         ]
         category_project_ids.sort(
             key=lambda project_id: project_total_hours_by_id.get(project_id, 0.0),
@@ -277,7 +269,7 @@ else:
         reverse=True,
     )
 
-    # Keep report order aligned to the requested ID sequence (Project 66389248 last) and skip IDs with no data/image.
+    # Keep report order aligned to the requested ID sequence and skip IDs with no data/image.
     latest_project_images = [
         (project_id, project_image_by_id[project_id])
         for project_id in report_project_ids
@@ -336,10 +328,11 @@ else:
             "</tr>"
         )
         for row in project_reference_rows
+        if row["Project Id"] in report_project_ids
     )
     html_parts.extend([
         "<section class='toc report-page'>",
-        "<h2>Clean Energy Systems and R&amp;D | Project Time Allocation</h2>",
+        "<h2>Defense Engineering | Project Time Allocation</h2>",
         "<table>",
         "<thead><tr><th>Category</th><th>Project</th><th>Code</th><th>Project ID</th></tr></thead>",
         f"<tbody>{reference_rows_html}</tbody>",

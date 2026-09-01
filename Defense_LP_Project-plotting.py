@@ -1,4 +1,4 @@
-"""Open and load the most recent timesheet_export Excel file.
+"""Create the Defense project sparkline report from the latest timesheet export.
 
 This script searches for timesheet_export (N).xlsx files in the current directory
 and loads the one with the highest revision number into a pandas DataFrame.
@@ -13,6 +13,7 @@ import io
 import os
 import shutil
 import subprocess
+import textwrap
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,124 +31,72 @@ GENERATE_VERTICAL_BAR_CHART = False
 # Set to True to automatically render the Quarto HTML report after script output.
 AUTO_RENDER_QMD_REPORT = True
 
+# The compilation image is not used by the HTML/PDF and can consume substantial memory.
+GENERATE_COMPILATION_IMAGE = False
+
+# Projects below this total are excluded from the project table and dedicated pages.
+MIN_REPORT_PROJECT_HOURS = 10.0
+
 # PDF page size: 11x17" paper in landscape orientation (width x height, inches).
 PDF_PAGE_SIZE_INCHES = (17, 11)
 # PDF page size: 11x17" paper in portrait orientation, used for specific pages below.
 PDF_PAGE_SIZE_PORTRAIT_INCHES = (11, 17)
 
 # Project/Task pages rendered in portrait rather than landscape orientation.
-PDF_PORTRAIT_PROJECT_IDS = {66389248, 88341467}
-PDF_PORTRAIT_TASK_IDS = {66391038, 82785553}
+PDF_PORTRAIT_PROJECT_IDS: set[int] = set()
+PDF_PORTRAIT_TASK_IDS: set[int] = set()
 
 # Merge historical task IDs into active task IDs before aggregation.
-TASK_ID_MERGE_MAP = {
-    91971495: 92739080,
-}
+TASK_ID_MERGE_MAP: dict[int, int] = {}
 
 REQUIRED_COLUMNS = ['Month', 'Task Id', 'Task', 'Project Id', 'Project', 'Hours (h)']
 EMPLOYEE_COLUMN_CANDIDATES = ['Employee', 'Employee Name', 'Assignee', 'User', 'Person', 'Resource', 'Member', 'For']
-SPECIFIC_PROJECT_IDS = [
-    88341467,
-    84929307,
-    83437623,
-    93076382,
-    92781007,
-    94279174,
-    92781028,
-    92723243,
-    66389248,
-    93159133,
-    92777746,
-    94279211,
-    92723205,
-    82757598,
-    83466138,
-    52104089,
-    92781049,
-    93176164,
-    94469212,
-    94696184,
-]
-
-# Project 66389248 aggregates several distinct Task Ids; render one extra
-# line+bar chart per Task Id, placed directly below the parent project chart.
-TASK_BREAKDOWN_PROJECT_ID = 66389248
+EMPLOYEE_NUMBER_COLUMN = 'Employee Number (Profile)'
+DEFENSE_EMPLOYEE_NUMBER_BY_LP_ID = {
+    264082: 5514,  # Andrew Clayton
+    132491: 5253,  # Brock Francis
+    111714: 5164,  # Donald Gill Jr.
+    132472: 5433,  # Benjamin Groleau
+    128148: 5198,  # Michael Johnson
+    132473: 5392,  # Christopher Matthews
+    211713: 5434,  # Colin McRae
+    207441: 5420,  # Gregory Norris
+    207433: 5124,  # Jerrald Ogle
+    255931: 5500,  # Rushton Westcott
+    263422: 5511,  # David Wolniewicz
+}
+# No Defense task-level breakdown project has been selected yet.
+TASK_BREAKDOWN_PROJECT_ID: int | None = None
 TASK_BAR_COLOR = 'green'
 
-CATEGORY_ORDER = ['ADMIN', 'NPD', 'SUPPORT', 'FIELD SVC']
-PROJECT_CATEGORY_BY_ID = {
-    88341467: 'ADMIN',
-    84929307: 'ADMIN',
-    83437623: 'ADMIN',
-    93076382: 'NPD',
-    92781007: 'NPD',
-    94279174: 'NPD',
-    92781028: 'NPD',
-    92723243: 'NPD',
-    66389248: 'SUPPORT',
-    93159133: 'SUPPORT',
-    92777746: 'SUPPORT',
-    94279211: 'SUPPORT',
-    92723205: 'SUPPORT',
-    82757598: 'SUPPORT',
-    83466138: 'SUPPORT',
-    52104089: 'SUPPORT',
-    92781049: 'SUPPORT',
-    93176164: 'SUPPORT',
-    94469212: 'FIELD SVC',
-    94696184: 'FIELD SVC',
+PROJECT_CATEGORY_BY_ID: dict[int, str] = {}
+
+PROJECT_REFERENCE_BY_ID: dict[int, str] = {}
+
+# Defense projects are discovered from employee time in each input workbook.
+ADMIN_PROJECT_IDS = {
+    58589966,
+    57916280,
+    57916278,
+    58068435,
+    61538760,
+    57916281,
 }
+SUPPORT_PROJECT_IDS = {
+    66389248,
+    75709273,
+    57163983,
+    51842049,
+    75709167,
+    52104089,
+}
+CATEGORY_ORDER = ['ADMIN', 'NRE', 'SUPPORT']
 CATEGORY_COLORS = {
     'ADMIN': '#577590',
-    'NPD': '#1d4ed8',
+    'NRE': '#1d4ed8',
     'SUPPORT': '#2a9d8f',
-    'FIELD SVC': '#e76f51',
 }
-
-PROJECT_REFERENCE_BY_ID = {
-    88341467: "ABSENT, FLEXTIME, HOLIDAY",
-    84929307: "TRAINING",
-    83437623: "ENGINEERING MANAGEMENT",
-    93076382: "CPS G5 AUSTRALIA",
-    92781007: "CPS GEN5 IEEE 2800",
-    94279174: "CPS G5.1",
-    92781028: "DPS PV",
-    92723243: "150KW ISOLATED DC/DC - DAB",
-    66389248: "PRODUCT LINE",
-    93159133: "ERCOT MODELING",
-    92777746: "CPS GEN5 2ND SOURCING",
-    94279211: "AI EMULATOR",
-    92723205: "EMT MODELING",
-    82757598: "CPS GEN5 SALT FOG FILTER",
-    83466138: "DSP CONTROLLER",
-    52104089: "DPS-1000 OPTIONS",
-    92781049: "DPS1000 2ND SOURCING",
-    93176164: "MEDIUM LEVEL CONTROLLER",
-    94469212: "ENGINEERING SUPPORT",
-    94696184: "532034*001 | VOLTIFY INC | INV-CPS-S--FLDSRVC | 149452",
-}
-PROJECT_CODE_BY_ID = {
-    88341467: 'ABS',
-    84929307: 'TRN',
-    83437623: 'ENGM',
-    93076382: 'R&DO',
-    92781007: 'R&DG',
-    94279174: 'R&DA',
-    92781028: 'R&DZ',
-    92723243: 'R&DN',
-    66389248: '--',
-    93159133: 'CPS5',
-    92777746: 'R&D4',
-    94279211: 'R&DF',
-    92723205: 'R&DB',
-    82757598: 'R&DE',
-    83466138: 'R&DM',
-    52104089: 'R&DV',
-    92781049: 'R&DJ',
-    93176164: '--',
-    94469212: '--',
-    94696184: '--',
-}
+PROJECT_HOUR_TARGETS: dict[int, dict[str, float | None]] = {}
 
 
 def resolve_quarto_executable() -> str | None:
@@ -165,7 +114,7 @@ def resolve_quarto_executable() -> str | None:
 
 def render_qmd_report(script_dir: Path, output_prefix: str, executed_at: str) -> bool:
     """Render the project sparkline QMD report into the output folder."""
-    qmd_file = script_dir / 'Sparkline_LP_Project-plotting.qmd'
+    qmd_file = script_dir / 'Defense_LP_Project-plotting.qmd'
     if not qmd_file.exists():
         print(f"Quarto report file not found, skipping render: {qmd_file}")
         return False
@@ -302,13 +251,33 @@ def generate_project_pdf_report(
     def add_image_page(image_file: Path, title: str, page_size: tuple[int, int]) -> None:
         nonlocal page_num
         image_data = mpimg.imread(image_file)
+        is_portrait = page_size == PDF_PAGE_SIZE_PORTRAIT_INCHES
+        title_width = 72 if is_portrait else 110
+        wrapped_title = '\n'.join(
+            textwrap.wrap(
+                title,
+                width=title_width,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        )
+        title_line_count = wrapped_title.count('\n') + 1
+        image_top = 0.88 if title_line_count > 1 else 0.92
         fig = plt.figure(figsize=page_size)
-        ax = fig.add_axes([0.04, 0.12, 0.92, 0.80])
+        ax = fig.add_axes([0.04, 0.12, 0.92, image_top - 0.12])
         ax.imshow(image_data)
         ax.axis('off')
-        fig.suptitle(title, fontsize=12, fontweight='bold', y=0.97)
+        fig.suptitle(
+            wrapped_title,
+            fontsize=12,
+            fontweight='bold',
+            y=0.97,
+            va='top',
+            linespacing=1.15,
+        )
         fig.text(0.5, 0.03, f'Page {page_num} | Executed: {executed_at}', ha='center', va='center', fontsize=9)
-        pdf.savefig(fig, orientation='landscape')
+        page_orientation = 'portrait' if is_portrait else 'landscape'
+        pdf.savefig(fig, orientation=page_orientation)
         plt.close(fig)
         page_num += 1
 
@@ -318,14 +287,13 @@ def generate_project_pdf_report(
 
             # Put the ordered project reference table on the first PDF page.
             month_labels = project_month_labels or []
-            table_columns = ['Category', 'Project', 'Code', 'Project ID'] + month_labels + ['Total Hours']
+            table_columns = ['Category', 'Project', 'Project ID'] + month_labels + ['Total Hours']
             table_rows = []
             for project_id in ordered_project_ids:
                 monthly_hours = (project_month_hours_by_id or {}).get(project_id, {})
                 table_rows.append([
                     PROJECT_CATEGORY_BY_ID.get(project_id, 'Unknown'),
                     PROJECT_REFERENCE_BY_ID.get(project_id, 'Unknown Project'),
-                    PROJECT_CODE_BY_ID.get(project_id, '--'),
                     str(project_id),
                     *[f'{monthly_hours.get(month_label, 0.0):.1f}' for month_label in month_labels],
                     f'{(project_total_hours_by_id or {}).get(project_id, 0.0):.1f}',
@@ -335,7 +303,7 @@ def generate_project_pdf_report(
             table_ax = table_fig.add_axes([0.02, 0.08, 0.96, 0.84])
             table_ax.axis('off')
             table_ax.set_title(
-                'Clean Energy Systems and R&D | Project Time Allocation',
+                'Defense Engineering | Project Time Allocation',
                 fontsize=16,
                 fontweight='bold',
                 pad=18,
@@ -343,7 +311,7 @@ def generate_project_pdf_report(
             table = table_ax.table(
                 cellText=table_rows,
                 colLabels=table_columns,
-                colWidths=[0.11, 0.34, 0.055, 0.09, *([0.04] * len(month_labels)), 0.085],
+                colWidths=[0.11, 0.38, 0.09, *([0.04] * len(month_labels)), 0.085],
                 cellLoc='center',
                 colLoc='center',
                 loc='center',
@@ -370,13 +338,12 @@ def generate_project_pdf_report(
                 add_image_page(image_file, page_title, PDF_PAGE_SIZE_INCHES)
 
             for project_id, image_file in ordered_images:
-                page_size = PDF_PAGE_SIZE_PORTRAIT_INCHES if project_id in PDF_PORTRAIT_PROJECT_IDS else PDF_PAGE_SIZE_INCHES
                 project_name = PROJECT_REFERENCE_BY_ID.get(project_id, 'Unknown Project')
                 project_total = (project_total_hours_by_id or {}).get(project_id, 0.0)
                 add_image_page(
                     image_file,
                     f'{project_name} | Project ID {project_id} | Total: {project_total:.1f}h',
-                    page_size,
+                    PDF_PAGE_SIZE_PORTRAIT_INCHES,
                 )
 
                 # Insert the Task Id breakdown pages directly below their parent project page.
@@ -385,15 +352,12 @@ def generate_project_pdf_report(
                         task_image_file = latest_images_by_task.get(task_id)
                         if not task_image_file:
                             continue
-                        task_page_size = (
-                            PDF_PAGE_SIZE_PORTRAIT_INCHES if task_id in PDF_PORTRAIT_TASK_IDS else PDF_PAGE_SIZE_INCHES
-                        )
                         task_name = (task_name_by_id or {}).get(task_id, 'Unknown Task')
                         task_total = (task_total_hours_by_id or {}).get(task_id, 0.0)
                         add_image_page(
                             task_image_file,
                             f'{task_name} | Task ID {task_id} | Total: {task_total:.1f}h',
-                            task_page_size,
+                            PDF_PAGE_SIZE_PORTRAIT_INCHES,
                         )
 
         print(f'PDF report saved to: {pdf_file}')
@@ -629,24 +593,98 @@ def create_entity_employee_sparkline_plots(
         )
         employees = employee_total_hours_series.index.tolist()
         n_rows = len(employees)
-        fig_height = max(2.5, (0.55 * n_rows) + 1.8) + 2.2
+        fig_height = max(2.5, (0.55 * n_rows) + 1.8) + 4.4
 
         fig, axes = plt.subplots(
-            n_rows + 1,
+            n_rows + 2,
             1,
             figsize=(12, fig_height),
             sharex=True,
-            gridspec_kw={'height_ratios': [1.8] + [1] * n_rows},
+            gridspec_kw={'height_ratios': [1.8, 1.8] + [1] * n_rows},
         )
-        total_ax = axes[0]
-        employee_axes = axes[1:]
+        cumulative_ax = axes[0]
+        total_ax = axes[1]
+        employee_axes = axes[2:]
 
-        # Total team hours per month, across all employees, plotted as a line above the bars.
         total_series = (
             entity_df.groupby('MonthKey')['Hours (h)']
             .sum()
             .reindex(month_labels, fill_value=0)
         )
+        cumulative_series = total_series.cumsum()
+        hour_targets = PROJECT_HOUR_TARGETS.get(entity_id, {})
+        sales_budget_hours = hour_targets.get('sales_budget_hours')
+        allocated_hours = hour_targets.get('allocated_hours')
+        configured_targets = [
+            float(target)
+            for target in (sales_budget_hours, allocated_hours)
+            if target is not None
+        ]
+        cumulative_ax.plot(
+            range(len(month_labels)),
+            cumulative_series.values,
+            color='#2a9d8f',
+            marker='o',
+            linewidth=2,
+            markersize=4,
+        )
+        cumulative_ax.fill_between(
+            range(len(month_labels)),
+            cumulative_series.values,
+            color='#2a9d8f',
+            alpha=0.08,
+        )
+        cumulative_max_hours = max(float(cumulative_series.max()), *configured_targets, 1.0)
+        cumulative_ax.set_ylim(0, cumulative_max_hours * 1.2)
+        cumulative_ax.set_yticks([])
+        cumulative_ax.grid(axis='y', alpha=0.2, linewidth=0.5)
+        cumulative_ax.text(
+            -0.08, 0.82, 'Total Team Cumulative', transform=cumulative_ax.transAxes,
+            fontsize=8, fontweight='bold', va='top', ha='right', clip_on=False,
+        )
+        for x_pos, hour_value in enumerate(cumulative_series.values):
+            if hour_value > 0:
+                cumulative_ax.text(
+                    x_pos,
+                    float(hour_value) + (cumulative_max_hours * 0.03),
+                    f"{float(hour_value):.1f}",
+                    ha='center',
+                    va='bottom',
+                    fontsize=7,
+                    fontweight='bold',
+                    color='#2a9d8f',
+                )
+        target_line_specs = [
+            ('Sales Budget Hours', sales_budget_hours, '#c1121f', '--'),
+            ('Allocated Hours', allocated_hours, '#f4a261', '-.'),
+        ]
+        for target_label, target_hours, target_color, line_style in target_line_specs:
+            if target_hours is None:
+                continue
+            target_value = float(target_hours)
+            cumulative_ax.axhline(
+                target_value,
+                color=target_color,
+                linestyle=line_style,
+                linewidth=1.5,
+            )
+            cumulative_ax.text(
+                0.99,
+                target_value,
+                f'{target_label}: {target_value:.1f}h',
+                transform=cumulative_ax.get_yaxis_transform(),
+                fontsize=7,
+                fontweight='bold',
+                color=target_color,
+                va='bottom',
+                ha='right',
+            )
+        cumulative_ax.spines['top'].set_visible(False)
+        cumulative_ax.spines['right'].set_visible(False)
+        cumulative_ax.spines['left'].set_visible(False)
+        cumulative_ax.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+
+        # Total team hours per month, across all employees.
         total_ax.plot(
             range(len(month_labels)),
             total_series.values,
@@ -765,11 +803,12 @@ def create_entity_employee_sparkline_plots(
         fig.savefig(image_file, format='png', dpi=300, bbox_inches='tight')
         print(f"Saved sparkline image: {image_file}")
 
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
-        buffer.seek(0)
-        output_images.append((image_label, mpimg.imread(buffer)))
-        buffer.close()
+        if GENERATE_COMPILATION_IMAGE:
+            buffer = io.BytesIO()
+            fig.savefig(buffer, format='png', dpi=300, bbox_inches='tight')
+            buffer.seek(0)
+            output_images.append((image_label, mpimg.imread(buffer)))
+            buffer.close()
         plt.close(fig)
 
     return output_images
@@ -883,10 +922,12 @@ def create_category_split_charts(
 
 def main() -> None:
     """Run the end-to-end sparkline workflow."""
+    global PROJECT_CATEGORY_BY_ID, PROJECT_REFERENCE_BY_ID
+
     script_dir = Path(__file__).parent
     execution_time = datetime.now().astimezone()
     executed_at = execution_time.strftime('%Y-%m-%d %H:%M:%S %Z')
-    file_prefix = f'DP-Program_Investment_{execution_time.strftime("%Y-%m-%d_%H-%M-%S")}'
+    file_prefix = f'Defense_LP_Project_{execution_time.strftime("%Y-%m-%d_%H-%M-%S")}'
     latest_revision, latest_file, file_count = find_latest_timesheet_export(script_dir)
 
     print(f'Found {file_count} timesheet_export file(s)')
@@ -908,14 +949,47 @@ def main() -> None:
     else:
         print(f'\nUsing employee column for sparklines: {employee_col}')
 
-    missing_columns = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    missing_columns = [col for col in REQUIRED_COLUMNS + [EMPLOYEE_NUMBER_COLUMN] if col not in df.columns]
     if missing_columns:
         print(f'\nWarning: Missing columns: {missing_columns}')
         print('Available columns:', list(df.columns))
         return
 
-    df_curated = prepare_curated_dataframe(df, employee_col)
-    df_project_source = df_curated[df_curated['Project Id'].isin(SPECIFIC_PROJECT_IDS)].copy()
+    defense_employee_numbers = set(DEFENSE_EMPLOYEE_NUMBER_BY_LP_ID.values())
+    defense_employee_rows = df[
+        df[EMPLOYEE_NUMBER_COLUMN].isin(defense_employee_numbers)
+        & (df['Hours (h)'] > 0)
+    ].copy()
+    discovered_project_ids = sorted(
+        defense_employee_rows['Project Id'].dropna().astype(int).unique().tolist()
+    )
+    if not discovered_project_ids:
+        print('\nNo projects found for the configured Defense employees.')
+        return
+
+    print(
+        f'\nDiscovered {len(discovered_project_ids)} projects from '
+        f'{defense_employee_rows[EMPLOYEE_NUMBER_COLUMN].nunique()} Defense employees.'
+    )
+
+    df_curated = prepare_curated_dataframe(defense_employee_rows, employee_col)
+    df_project_source = df_curated[df_curated['Project Id'].isin(discovered_project_ids)].copy()
+    PROJECT_CATEGORY_BY_ID = {
+        project_id: (
+            'ADMIN' if project_id in ADMIN_PROJECT_IDS
+            else 'SUPPORT' if project_id in SUPPORT_PROJECT_IDS
+            else 'NRE'
+        )
+        for project_id in discovered_project_ids
+    }
+    PROJECT_REFERENCE_BY_ID = (
+        df_project_source[['Project Id', 'Project']]
+        .drop_duplicates(subset=['Project Id'])
+        .assign(**{'Project Id': lambda data: data['Project Id'].astype(int)})
+        .set_index('Project Id')['Project']
+        .astype(str)
+        .to_dict()
+    )
 
     df_project_grouped = (
         df_project_source.groupby(['Month', 'Project Id', 'Project'])['Hours (h)']
@@ -931,8 +1005,11 @@ def main() -> None:
     report_project_ids = []
     for category in CATEGORY_ORDER:
         category_project_ids = [
-            project_id for project_id in SPECIFIC_PROJECT_IDS
-            if PROJECT_CATEGORY_BY_ID.get(project_id) == category
+            project_id for project_id in discovered_project_ids
+            if (
+                PROJECT_CATEGORY_BY_ID.get(project_id) == category
+                and project_total_hours_by_id.get(project_id, 0.0) >= MIN_REPORT_PROJECT_HOURS
+            )
         ]
         category_project_ids.sort(
             key=lambda project_id: project_total_hours_by_id.get(project_id, 0.0),
@@ -956,7 +1033,7 @@ def main() -> None:
     print(f"Total months: {df_project_filtered['Month'].nunique()}")
     print('\nFiltered Project data preview:')
     print(df_project_filtered.head(10))
-    missing_project_ids = sorted(set(SPECIFIC_PROJECT_IDS) - set(df_project_source['Project Id'].dropna().astype(int).tolist()))
+    missing_project_ids = sorted(set(discovered_project_ids) - set(df_project_source['Project Id'].dropna().astype(int).tolist()))
     if missing_project_ids:
         print(f'Warning: Requested Project Ids not found in grouped data: {missing_project_ids}')
 
@@ -988,14 +1065,15 @@ def main() -> None:
             script_dir=script_dir,
             latest_revision=latest_revision,
         )
-        create_sparkline_compilation_image(
-            sparkline_images=project_sparkline_images,
-            script_dir=script_dir,
-            latest_revision=latest_revision,
-            output_prefix='all_project',
-            file_prefix=file_prefix,
-            compilation_title='Employee Sparkline Compilation - All Projects',
-        )
+        if GENERATE_COMPILATION_IMAGE:
+            create_sparkline_compilation_image(
+                sparkline_images=project_sparkline_images,
+                script_dir=script_dir,
+                latest_revision=latest_revision,
+                output_prefix='all_project',
+                file_prefix=file_prefix,
+                compilation_title='Employee Sparkline Compilation - All Projects',
+            )
         cleanup_stale_entity_images(
             script_dir=script_dir,
             latest_revision=latest_revision,
@@ -1004,8 +1082,8 @@ def main() -> None:
             file_prefix=file_prefix,
         )
 
-    # Project 66389248 rolls up multiple tasks; break it down into one chart per Task Id,
-    # ordered from the highest total hours (across all employees/months) to the lowest.
+    # When selected, break the rollup project into one chart per Task Id,
+    # ordered from the highest total hours to the lowest.
     df_task_breakdown_source = df_project_source[df_project_source['Project Id'] == TASK_BREAKDOWN_PROJECT_ID].copy()
     task_hours_totals = df_task_breakdown_source.groupby('Task Id')['Hours (h)'].sum().sort_values(ascending=False)
     task_ids = task_hours_totals.index.dropna().astype(int).tolist()
@@ -1054,14 +1132,15 @@ def main() -> None:
                 script_dir=script_dir,
                 latest_revision=latest_revision,
             )
-            create_sparkline_compilation_image(
-                sparkline_images=task_sparkline_images,
-                script_dir=script_dir,
-                latest_revision=latest_revision,
-                output_prefix='all_task',
-                file_prefix=file_prefix,
-                compilation_title=f'Employee Sparkline Compilation - Tasks in Project {TASK_BREAKDOWN_PROJECT_ID}',
-            )
+            if GENERATE_COMPILATION_IMAGE:
+                create_sparkline_compilation_image(
+                    sparkline_images=task_sparkline_images,
+                    script_dir=script_dir,
+                    latest_revision=latest_revision,
+                    output_prefix='all_task',
+                    file_prefix=file_prefix,
+                    compilation_title=f'Employee Sparkline Compilation - Tasks in Project {TASK_BREAKDOWN_PROJECT_ID}',
+                )
             cleanup_stale_entity_images(
                 script_dir=script_dir,
                 latest_revision=latest_revision,

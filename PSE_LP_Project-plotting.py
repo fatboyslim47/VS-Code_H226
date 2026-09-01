@@ -1,4 +1,4 @@
-"""Open and load the most recent timesheet_export Excel file.
+"""Create the Power Systems project sparkline report from the latest timesheet export.
 
 This script searches for timesheet_export (N).xlsx files in the current directory
 and loads the one with the highest revision number into a pandas DataFrame.
@@ -13,6 +13,7 @@ import io
 import os
 import shutil
 import subprocess
+import textwrap
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,124 +31,206 @@ GENERATE_VERTICAL_BAR_CHART = False
 # Set to True to automatically render the Quarto HTML report after script output.
 AUTO_RENDER_QMD_REPORT = True
 
+# Projects below this total are excluded from the project table and dedicated pages.
+MIN_REPORT_PROJECT_HOURS = 10.0
+
 # PDF page size: 11x17" paper in landscape orientation (width x height, inches).
 PDF_PAGE_SIZE_INCHES = (17, 11)
 # PDF page size: 11x17" paper in portrait orientation, used for specific pages below.
 PDF_PAGE_SIZE_PORTRAIT_INCHES = (11, 17)
 
 # Project/Task pages rendered in portrait rather than landscape orientation.
-PDF_PORTRAIT_PROJECT_IDS = {66389248, 88341467}
-PDF_PORTRAIT_TASK_IDS = {66391038, 82785553}
+PDF_PORTRAIT_PROJECT_IDS: set[int] = set()
+PDF_PORTRAIT_TASK_IDS: set[int] = set()
 
 # Merge historical task IDs into active task IDs before aggregation.
-TASK_ID_MERGE_MAP = {
-    91971495: 92739080,
-}
+TASK_ID_MERGE_MAP: dict[int, int] = {}
 
 REQUIRED_COLUMNS = ['Month', 'Task Id', 'Task', 'Project Id', 'Project', 'Hours (h)']
 EMPLOYEE_COLUMN_CANDIDATES = ['Employee', 'Employee Name', 'Assignee', 'User', 'Person', 'Resource', 'Member', 'For']
 SPECIFIC_PROJECT_IDS = [
-    88341467,
-    84929307,
-    83437623,
-    93076382,
-    92781007,
-    94279174,
-    92781028,
-    92723243,
-    66389248,
-    93159133,
-    92777746,
-    94279211,
-    92723205,
-    82757598,
-    83466138,
-    52104089,
-    92781049,
-    93176164,
-    94469212,
-    94696184,
+    60372899,
+    57163926,
+    65089755,
+    65089745,
+    51842016,
+    68661669,
+    57518175,
+    57163983,
+    57141713,
+    57164010,
+    64522424,
+    58399098,
+    94536019,
+    94530037,
+    93125706,
+    94674346,
+    94696475,
+    94730740,
+    84914420,
+    71393425,
+    94696529,
+    94771802,
+    92770531,
+    93665128,
+    93694962,
+    93634329,
+    93634332,
+    93634333,
+    93634334,
+    93634335,
+    93634348,
+    93634363,
+    93634364,
+    93653142,
+    93709794,
+    93731848,
+    93731846,
+    93759194,
+    94268087,
+    93804789,
+    94435652,
+    94509413,
+    94789056,
 ]
 
-# Project 66389248 aggregates several distinct Task Ids; render one extra
-# line+bar chart per Task Id, placed directly below the parent project chart.
-TASK_BREAKDOWN_PROJECT_ID = 66389248
+# No PSE task-level breakdown project has been selected yet.
+TASK_BREAKDOWN_PROJECT_ID: int | None = None
 TASK_BAR_COLOR = 'green'
 
-CATEGORY_ORDER = ['ADMIN', 'NPD', 'SUPPORT', 'FIELD SVC']
+CATEGORY_ORDER = ['ADMIN', 'NRE', 'SUPPORT']
+NRE_PROJECT_IDS = {
+    94530037,
+    93125706,
+    94674346,
+    94696475,
+    94730740,
+    84914420,
+    71393425,
+    94536019,
+    94696529,
+    94771802,
+    92770531,
+    93665128,
+    93694962,
+    93634329,
+    93634332,
+    93634333,
+    93634334,
+    93634335,
+    93634348,
+    93634363,
+    93634364,
+    93653142,
+    93709794,
+    93731848,
+    93731846,
+    93759194,
+    94268087,
+    93804789,
+    94435652,
+    94509413,
+    94789056,
+}
+NRE_HOUR_TARGETS: dict[int, dict[str, float | None]] = {
+    94530037: {'sales_budget_hours': 8, 'allocated_hours': 36},  # 531893-001 | EAST PENN | 6V-250A | 11-30-2026
+    93125706: {'sales_budget_hours': 200, 'allocated_hours': 200},  # 530347*001 | US STEEL | PSPLY-SCR 250V, 6KA | 7/31/2026
+    94674346: {'sales_budget_hours': 400, 'allocated_hours': 10},  # 527660*001 | GIBRALTAR MINES LTD. | 78V - 21000A PSPLY-SCR | 02/26/27
+    94696475: {'sales_budget_hours': 600, 'allocated_hours': 10},  # 520070*001 | AMERICAN PACIFIC CORP. | 360V,5000A | 03/10/27
+    94730740: {'sales_budget_hours': 0, 'allocated_hours': 10},  # 151531-001 | FOURTH POWER Inc | NS*PSPLY-SCR-MISC | 09/04/26
+    84914420: {'sales_budget_hours': 2300, 'allocated_hours': 566},  # 519273*001 | US NAVY KING's BA-TRIDENT | 650V - 6500A | 08/19/26
+    71393425: {'sales_budget_hours': 80, 'allocated_hours': 92},  # 522669*002 | PHOENIX PULP & PAPER | NS*PS-HIGH-SE-TRANS | 02/13/2026
+    94536019: {'sales_budget_hours': 200, 'allocated_hours': 200},  # 530704*001 | CLEVELAND-CLIFFS | 250V - 6000A PSPLY-SCR | 12/30/26
+    94696529: {'sales_budget_hours': 500, 'allocated_hours': 10},  # 526776*001 | AEDC WHITE OAK | 200V - 6500A PS-SCR-S-PM | 06/25/27
+    94771802: {'sales_budget_hours': 80, 'allocated_hours': 10},  # 531806*001 | SCR INC - ELITE METAL | 180V, 4000A | 01/29/27
+    92770531: {'sales_budget_hours': 20, 'allocated_hours': 20},  # 529905*001 | 12V - 3000V YOUNG-DAVIDSON MINE | 9-30-2026
+    93665128: {'sales_budget_hours': None, 'allocated_hours': None},  # 530881*003 | ELECTRIC BOAT CORPORATION | NS*PS-SCR FLDSRVC | 04/02/2026
+    93694962: {'sales_budget_hours': None, 'allocated_hours': None},  # 530538*001 | NORTH AMERICAN STAINLESS | NS*RMA-REPAIR-PSPLY | 4/22/2026
+    93634329: {'sales_budget_hours': None, 'allocated_hours': None},  # 530255*001 | US Steel | PSPLY-SCR 36V, 9K | 12/8/2026
+    93634332: {'sales_budget_hours': None, 'allocated_hours': None},  # 530273*001 | US Steel | PSPLY-SCR 36V, 9KA | 6/8/2026
+    93634333: {'sales_budget_hours': None, 'allocated_hours': None},  # 530274*001 | US Steel | PSPLY-SCR 36V, 9KA | 6/8/2026
+    93634334: {'sales_budget_hours': None, 'allocated_hours': None},  # 530275*001 | US Steel | PSPLY-SCR 36V, 9KA | 8/8/2026
+    93634335: {'sales_budget_hours': None, 'allocated_hours': None},  # 530276*001 | US Steel | PSPLY-SCR 36V, 9KA | 8/8/2026
+    93634348: {'sales_budget_hours': None, 'allocated_hours': None},  # 530277*001 | US Steel | PSPLY-SCR 36V, 9KA | 10/8/2026
+    93634363: {'sales_budget_hours': None, 'allocated_hours': None},  # 530278*001 | US Steel | PSPLY-SCR 36V, 9KA | 10/8/2026
+    93634364: {'sales_budget_hours': None, 'allocated_hours': None},  # 530279*001 | US Steel | PSPLY-SCR 36V, 9KA | 12/8/2026
+    93653142: {'sales_budget_hours': None, 'allocated_hours': None},  # 529088*001 | FREEPORT EL PASO | 20V 18KA PSPLY-SCR | 01/08/27
+    93709794: {'sales_budget_hours': None, 'allocated_hours': None},  # 521523*002 | ODYSSEY MANUFACTURING CO | 76V - 51.3KA REPAIR-TRANS | 04/03/26
+    93731848: {'sales_budget_hours': None, 'allocated_hours': None},  # 530240-001 | EATON CROUSE-HINDS | 12V - 8000A PSPLY-SCR | 09/25/26
+    93731846: {'sales_budget_hours': 7, 'allocated_hours': 20},  # 528530-004 | EATON CROUSE-HINDS | 12V - 4000A PSPLY-SCR-RAPIDX | 09/25/26
+    93759194: {'sales_budget_hours': 100, 'allocated_hours': 10},  # 530467-001 | D&S ELECTRICAL SUPPLY - IDAHO LABS | 1000V - 600A PSPLY-SPCL | 09/28/26
+    94268087: {'sales_budget_hours': None, 'allocated_hours': None},  # 531244*001 | OCCIDENTAL CHEMICAL CORP. | NP*PS-HIGH-SE-UPGDCNTRL | 11/30/26
+    93804789: {'sales_budget_hours': None, 'allocated_hours': None},  # 530721-001 | KING'S BAY - TRIDENT REFIT FACILITY | NS*PS-SCR-S-PM FLDSVC | 05/16/26
+    94435652: {'sales_budget_hours': None, 'allocated_hours': None},  # 531466*001 | HAMPTON CHROME | NS*REPAIR-PSPLY | 06/19/26
+    94509413: {'sales_budget_hours': None, 'allocated_hours': None},  # 517697*003 | VOLTA ENERGY SOLUTIONS | 9V - 15000A PSPLY-SMPS-CM | 09/26/26
+    94789056: {'sales_budget_hours': None, 'allocated_hours': None},  # 532007-001 | PCC AIRFOIL | REMOTE UPGRADE | 10/21/26
+}
+SUPPORT_PROJECT_IDS = {
+    65089755,
+    65089745,
+    51842016,
+    57163983,
+}
 PROJECT_CATEGORY_BY_ID = {
-    88341467: 'ADMIN',
-    84929307: 'ADMIN',
-    83437623: 'ADMIN',
-    93076382: 'NPD',
-    92781007: 'NPD',
-    94279174: 'NPD',
-    92781028: 'NPD',
-    92723243: 'NPD',
-    66389248: 'SUPPORT',
-    93159133: 'SUPPORT',
-    92777746: 'SUPPORT',
-    94279211: 'SUPPORT',
-    92723205: 'SUPPORT',
-    82757598: 'SUPPORT',
-    83466138: 'SUPPORT',
-    52104089: 'SUPPORT',
-    92781049: 'SUPPORT',
-    93176164: 'SUPPORT',
-    94469212: 'FIELD SVC',
-    94696184: 'FIELD SVC',
+    project_id: (
+        'NRE' if project_id in NRE_PROJECT_IDS
+        else 'SUPPORT' if project_id in SUPPORT_PROJECT_IDS
+        else 'ADMIN'
+    )
+    for project_id in SPECIFIC_PROJECT_IDS
 }
 CATEGORY_COLORS = {
     'ADMIN': '#577590',
-    'NPD': '#1d4ed8',
+    'NRE': '#1d4ed8',
     'SUPPORT': '#2a9d8f',
-    'FIELD SVC': '#e76f51',
 }
 
 PROJECT_REFERENCE_BY_ID = {
-    88341467: "ABSENT, FLEXTIME, HOLIDAY",
-    84929307: "TRAINING",
-    83437623: "ENGINEERING MANAGEMENT",
-    93076382: "CPS G5 AUSTRALIA",
-    92781007: "CPS GEN5 IEEE 2800",
-    94279174: "CPS G5.1",
-    92781028: "DPS PV",
-    92723243: "150KW ISOLATED DC/DC - DAB",
-    66389248: "PRODUCT LINE",
-    93159133: "ERCOT MODELING",
-    92777746: "CPS GEN5 2ND SOURCING",
-    94279211: "AI EMULATOR",
-    92723205: "EMT MODELING",
-    82757598: "CPS GEN5 SALT FOG FILTER",
-    83466138: "DSP CONTROLLER",
-    52104089: "DPS-1000 OPTIONS",
-    92781049: "DPS1000 2ND SOURCING",
-    93176164: "MEDIUM LEVEL CONTROLLER",
-    94469212: "ENGINEERING SUPPORT",
-    94696184: "532034*001 | VOLTIFY INC | INV-CPS-S--FLDSRVC | 149452",
+    60372899: 'ABS | ABSENT, FLEXTIME',
+    57163926: 'MEETINGS | MET',
+    65089755: 'SALES SUPPORT',
+    65089745: 'SERVICE SUPPORT',
+    51842016: 'CUSTOMER SUPPORT - AFTER SHIP',
+    68661669: 'RMA SUPPORT',
+    57518175: 'ENGX | GENERAL LABOR HRS',
+    57163983: 'PRODUCT LINE - SUPPORT',
+    57141713: 'ENGM | ENGINEERING MANAGEMENT',
+    57164010: 'TRAINING AND GOALS | TRN',
+    64522424: 'CONTINUOUS IMPROVEMENT | CI',
+    58399098: 'HOUSEKEEPING AND COMPUTER UPDATES | ENGX',
+    94536019: '530704*001 | CLEVELAND-CLIFFS | 250V - 6000A PSPLY-SCR | 12/30/26',
+    94530037: '531893-001 | EAST PENN | 6V-250A | 11-30-2026',
+    93125706: '530347*001 | US STEEL | PSPLY-SCR 250V, 6KA | 7/31/2026',
+    94674346: '527660*001 | GIBRALTAR MINES LTD. | 78V - 21000A PSPLY-SCR | 02/26/27',
+    94696475: '520070*001 | AMERICAN PACIFIC CORP. | 360V,5000A | 03/10/27',
+    94730740: '151531-001| FOURTH POWER Inc | NS*PSPLY-SCR-MISC | 09/04/26',
+    84914420: "519273*001 | US NAVY KING's BA-TRIDENT | 650V - 6500A | 08/19/26",
+    71393425: '522669*002 | PHOENIX PULP & PAPER| NS*PS-HIGH-SE-TRANS | 02/13/2026',
+    94696529: '526776*001 | AEDC WHITE OAK| 200V - 6500A PS-SCR-S-PM | 06/25/27',
+    94771802: '531806*001 | SCR INC - ELITE METAL| 180V, 4000A | 01/29/27',
+    92770531: '529905*001 | 12V - 3000V YOUNG-DAVIDSON MINE | 9-30-2026',
+    93665128: '530881*003 | ELECTRIC BOAT CORPORATION | NS*PS-SCR FLDSRVC| 04/02/2026',
+    93694962: '530538*001 | NORTH AMERICAN STAINLESS | NS*RMA-REPAIR-PSPLY | 4/22/2026',
+    93634329: '530255*001| US Steel | PSPLY-SCR 36V, 9K | 12/8/2026',
+    93634332: '530273*001| US Steel | PSPLY-SCR 36V, 9KA | 6/8/2026',
+    93634333: '530274*001| US Steel | PSPLY-SCR 36V, 9KA | 6/8/2026',
+    93634334: '530275*001| US Steel | PSPLY-SCR 36V, 9KA | 8/8/2026',
+    93634335: '530276*001| US Steel | PSPLY-SCR 36V, 9KA | 8/8/2026',
+    93634348: '530277*001| US Steel | PSPLY-SCR 36V, 9KA | 10/8/2026',
+    93634363: '530278*001| US Steel | PSPLY-SCR 36V, 9KA | 10/8/2026',
+    93634364: '530279*001| US Steel | PSPLY-SCR 36V, 9KA | 12/8/2026',
+    93653142: '529088*001 | FREEPORT EL PASO | 20V 18KA PSPLY-SCR | 01/08/27',
+    93709794: '521523*002 | ODYSSEY MANUFACTURING CO | 76V - 51.3KA REPAIR-TRANS | 04/03/26',
+    93731848: '530240-001 | EATON CROUSE-HINDS | 12V - 8000A PSPLY-SCR-| 09/25/26',
+    93731846: '528530-004 | EATON CROUSE-HINDS | 12V - 4000A PSPLY-SCR-RAPIDX | 09/25/26',
+    93759194: '530467-001 | D&S ELECTRICAL SUPPLY - IDAHO LABS | 1000V - 600A PSPLY-SPCL | 09/28/26',
+    94268087: '531244*001 | OCCIDENTAL CHEMICAL CORP. | NP*PS-HIGH-SE-UPGDCNTRL| 11/30/26',
+    93804789: "530721-001 | KING'S BAY - TRIDENT REFIT FACILITY | NS*PS-SCR-S-PM FLDSVC | 05/16/26",
+    94435652: '531466*001 | HAMPTON CHROME | NS*REPAIR-PSPLY | 06/19/26',
+    94509413: '517697*003 | VOLTA ENERGY SOLUTIONS | 9V - 15000A PSPLY-SMPS-CM | 09/26/26',
+    94789056: '532007-001|PCC AIRFOIL|REMOTE UPGRADE|10/21/26',
 }
-PROJECT_CODE_BY_ID = {
-    88341467: 'ABS',
-    84929307: 'TRN',
-    83437623: 'ENGM',
-    93076382: 'R&DO',
-    92781007: 'R&DG',
-    94279174: 'R&DA',
-    92781028: 'R&DZ',
-    92723243: 'R&DN',
-    66389248: '--',
-    93159133: 'CPS5',
-    92777746: 'R&D4',
-    94279211: 'R&DF',
-    92723205: 'R&DB',
-    82757598: 'R&DE',
-    83466138: 'R&DM',
-    52104089: 'R&DV',
-    92781049: 'R&DJ',
-    93176164: '--',
-    94469212: '--',
-    94696184: '--',
-}
+PROJECT_CODE_BY_ID = {project_id: '--' for project_id in SPECIFIC_PROJECT_IDS}
 
 
 def resolve_quarto_executable() -> str | None:
@@ -165,7 +248,7 @@ def resolve_quarto_executable() -> str | None:
 
 def render_qmd_report(script_dir: Path, output_prefix: str, executed_at: str) -> bool:
     """Render the project sparkline QMD report into the output folder."""
-    qmd_file = script_dir / 'Sparkline_LP_Project-plotting.qmd'
+    qmd_file = script_dir / 'PSE_LP_Project-plotting.qmd'
     if not qmd_file.exists():
         print(f"Quarto report file not found, skipping render: {qmd_file}")
         return False
@@ -302,13 +385,33 @@ def generate_project_pdf_report(
     def add_image_page(image_file: Path, title: str, page_size: tuple[int, int]) -> None:
         nonlocal page_num
         image_data = mpimg.imread(image_file)
+        is_portrait = page_size == PDF_PAGE_SIZE_PORTRAIT_INCHES
+        title_width = 72 if is_portrait else 110
+        wrapped_title = '\n'.join(
+            textwrap.wrap(
+                title,
+                width=title_width,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        )
+        title_line_count = wrapped_title.count('\n') + 1
+        image_top = 0.88 if title_line_count > 1 else 0.92
         fig = plt.figure(figsize=page_size)
-        ax = fig.add_axes([0.04, 0.12, 0.92, 0.80])
+        ax = fig.add_axes([0.04, 0.12, 0.92, image_top - 0.12])
         ax.imshow(image_data)
         ax.axis('off')
-        fig.suptitle(title, fontsize=12, fontweight='bold', y=0.97)
+        fig.suptitle(
+            wrapped_title,
+            fontsize=12,
+            fontweight='bold',
+            y=0.97,
+            va='top',
+            linespacing=1.15,
+        )
         fig.text(0.5, 0.03, f'Page {page_num} | Executed: {executed_at}', ha='center', va='center', fontsize=9)
-        pdf.savefig(fig, orientation='landscape')
+        page_orientation = 'portrait' if is_portrait else 'landscape'
+        pdf.savefig(fig, orientation=page_orientation)
         plt.close(fig)
         page_num += 1
 
@@ -318,14 +421,13 @@ def generate_project_pdf_report(
 
             # Put the ordered project reference table on the first PDF page.
             month_labels = project_month_labels or []
-            table_columns = ['Category', 'Project', 'Code', 'Project ID'] + month_labels + ['Total Hours']
+            table_columns = ['Category', 'Project', 'Project ID'] + month_labels + ['Total Hours']
             table_rows = []
             for project_id in ordered_project_ids:
                 monthly_hours = (project_month_hours_by_id or {}).get(project_id, {})
                 table_rows.append([
                     PROJECT_CATEGORY_BY_ID.get(project_id, 'Unknown'),
                     PROJECT_REFERENCE_BY_ID.get(project_id, 'Unknown Project'),
-                    PROJECT_CODE_BY_ID.get(project_id, '--'),
                     str(project_id),
                     *[f'{monthly_hours.get(month_label, 0.0):.1f}' for month_label in month_labels],
                     f'{(project_total_hours_by_id or {}).get(project_id, 0.0):.1f}',
@@ -335,7 +437,7 @@ def generate_project_pdf_report(
             table_ax = table_fig.add_axes([0.02, 0.08, 0.96, 0.84])
             table_ax.axis('off')
             table_ax.set_title(
-                'Clean Energy Systems and R&D | Project Time Allocation',
+                'Power Systems Engineering | Project Time Allocation',
                 fontsize=16,
                 fontweight='bold',
                 pad=18,
@@ -343,7 +445,7 @@ def generate_project_pdf_report(
             table = table_ax.table(
                 cellText=table_rows,
                 colLabels=table_columns,
-                colWidths=[0.11, 0.34, 0.055, 0.09, *([0.04] * len(month_labels)), 0.085],
+                colWidths=[0.11, 0.38, 0.09, *([0.04] * len(month_labels)), 0.085],
                 cellLoc='center',
                 colLoc='center',
                 loc='center',
@@ -370,13 +472,12 @@ def generate_project_pdf_report(
                 add_image_page(image_file, page_title, PDF_PAGE_SIZE_INCHES)
 
             for project_id, image_file in ordered_images:
-                page_size = PDF_PAGE_SIZE_PORTRAIT_INCHES if project_id in PDF_PORTRAIT_PROJECT_IDS else PDF_PAGE_SIZE_INCHES
                 project_name = PROJECT_REFERENCE_BY_ID.get(project_id, 'Unknown Project')
                 project_total = (project_total_hours_by_id or {}).get(project_id, 0.0)
                 add_image_page(
                     image_file,
                     f'{project_name} | Project ID {project_id} | Total: {project_total:.1f}h',
-                    page_size,
+                    PDF_PAGE_SIZE_PORTRAIT_INCHES,
                 )
 
                 # Insert the Task Id breakdown pages directly below their parent project page.
@@ -385,15 +486,12 @@ def generate_project_pdf_report(
                         task_image_file = latest_images_by_task.get(task_id)
                         if not task_image_file:
                             continue
-                        task_page_size = (
-                            PDF_PAGE_SIZE_PORTRAIT_INCHES if task_id in PDF_PORTRAIT_TASK_IDS else PDF_PAGE_SIZE_INCHES
-                        )
                         task_name = (task_name_by_id or {}).get(task_id, 'Unknown Task')
                         task_total = (task_total_hours_by_id or {}).get(task_id, 0.0)
                         add_image_page(
                             task_image_file,
                             f'{task_name} | Task ID {task_id} | Total: {task_total:.1f}h',
-                            task_page_size,
+                            PDF_PAGE_SIZE_PORTRAIT_INCHES,
                         )
 
         print(f'PDF report saved to: {pdf_file}')
@@ -629,24 +727,98 @@ def create_entity_employee_sparkline_plots(
         )
         employees = employee_total_hours_series.index.tolist()
         n_rows = len(employees)
-        fig_height = max(2.5, (0.55 * n_rows) + 1.8) + 2.2
+        fig_height = max(2.5, (0.55 * n_rows) + 1.8) + 4.4
 
         fig, axes = plt.subplots(
-            n_rows + 1,
+            n_rows + 2,
             1,
             figsize=(12, fig_height),
             sharex=True,
-            gridspec_kw={'height_ratios': [1.8] + [1] * n_rows},
+            gridspec_kw={'height_ratios': [1.8, 1.8] + [1] * n_rows},
         )
-        total_ax = axes[0]
-        employee_axes = axes[1:]
+        cumulative_ax = axes[0]
+        total_ax = axes[1]
+        employee_axes = axes[2:]
 
-        # Total team hours per month, across all employees, plotted as a line above the bars.
         total_series = (
             entity_df.groupby('MonthKey')['Hours (h)']
             .sum()
             .reindex(month_labels, fill_value=0)
         )
+        cumulative_series = total_series.cumsum()
+        hour_targets = NRE_HOUR_TARGETS.get(entity_id, {})
+        sales_budget_hours = hour_targets.get('sales_budget_hours')
+        allocated_hours = hour_targets.get('allocated_hours')
+        configured_targets = [
+            float(target)
+            for target in (sales_budget_hours, allocated_hours)
+            if target is not None
+        ]
+        cumulative_ax.plot(
+            range(len(month_labels)),
+            cumulative_series.values,
+            color='#2a9d8f',
+            marker='o',
+            linewidth=2,
+            markersize=4,
+        )
+        cumulative_ax.fill_between(
+            range(len(month_labels)),
+            cumulative_series.values,
+            color='#2a9d8f',
+            alpha=0.08,
+        )
+        cumulative_max_hours = max(float(cumulative_series.max()), *configured_targets, 1.0)
+        cumulative_ax.set_ylim(0, cumulative_max_hours * 1.2)
+        cumulative_ax.set_yticks([])
+        cumulative_ax.grid(axis='y', alpha=0.2, linewidth=0.5)
+        cumulative_ax.text(
+            -0.08, 0.82, 'Total Team Cumulative', transform=cumulative_ax.transAxes,
+            fontsize=8, fontweight='bold', va='top', ha='right', clip_on=False,
+        )
+        for x_pos, hour_value in enumerate(cumulative_series.values):
+            if hour_value > 0:
+                cumulative_ax.text(
+                    x_pos,
+                    float(hour_value) + (cumulative_max_hours * 0.03),
+                    f"{float(hour_value):.1f}",
+                    ha='center',
+                    va='bottom',
+                    fontsize=7,
+                    fontweight='bold',
+                    color='#2a9d8f',
+                )
+        target_line_specs = [
+            ('Sales Budget Hours', sales_budget_hours, '#c1121f', '--'),
+            ('Allocated Hours', allocated_hours, '#f4a261', '-.'),
+        ]
+        for target_label, target_hours, target_color, line_style in target_line_specs:
+            if target_hours is None:
+                continue
+            target_value = float(target_hours)
+            cumulative_ax.axhline(
+                target_value,
+                color=target_color,
+                linestyle=line_style,
+                linewidth=1.5,
+            )
+            cumulative_ax.text(
+                0.99,
+                target_value,
+                f'{target_label}: {target_value:.1f}h',
+                transform=cumulative_ax.get_yaxis_transform(),
+                fontsize=7,
+                fontweight='bold',
+                color=target_color,
+                va='bottom',
+                ha='right',
+            )
+        cumulative_ax.spines['top'].set_visible(False)
+        cumulative_ax.spines['right'].set_visible(False)
+        cumulative_ax.spines['left'].set_visible(False)
+        cumulative_ax.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+
+        # Total team hours per month, across all employees.
         total_ax.plot(
             range(len(month_labels)),
             total_series.values,
@@ -886,7 +1058,7 @@ def main() -> None:
     script_dir = Path(__file__).parent
     execution_time = datetime.now().astimezone()
     executed_at = execution_time.strftime('%Y-%m-%d %H:%M:%S %Z')
-    file_prefix = f'DP-Program_Investment_{execution_time.strftime("%Y-%m-%d_%H-%M-%S")}'
+    file_prefix = f'PSE_LP_Project_{execution_time.strftime("%Y-%m-%d_%H-%M-%S")}'
     latest_revision, latest_file, file_count = find_latest_timesheet_export(script_dir)
 
     print(f'Found {file_count} timesheet_export file(s)')
@@ -932,7 +1104,10 @@ def main() -> None:
     for category in CATEGORY_ORDER:
         category_project_ids = [
             project_id for project_id in SPECIFIC_PROJECT_IDS
-            if PROJECT_CATEGORY_BY_ID.get(project_id) == category
+            if (
+                PROJECT_CATEGORY_BY_ID.get(project_id) == category
+                and project_total_hours_by_id.get(project_id, 0.0) >= MIN_REPORT_PROJECT_HOURS
+            )
         ]
         category_project_ids.sort(
             key=lambda project_id: project_total_hours_by_id.get(project_id, 0.0),
@@ -1004,8 +1179,8 @@ def main() -> None:
             file_prefix=file_prefix,
         )
 
-    # Project 66389248 rolls up multiple tasks; break it down into one chart per Task Id,
-    # ordered from the highest total hours (across all employees/months) to the lowest.
+    # When selected, break the rollup project into one chart per Task Id,
+    # ordered from the highest total hours to the lowest.
     df_task_breakdown_source = df_project_source[df_project_source['Project Id'] == TASK_BREAKDOWN_PROJECT_ID].copy()
     task_hours_totals = df_task_breakdown_source.groupby('Task Id')['Hours (h)'].sum().sort_values(ascending=False)
     task_ids = task_hours_totals.index.dropna().astype(int).tolist()
