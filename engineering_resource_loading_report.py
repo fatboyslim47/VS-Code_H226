@@ -1,7 +1,7 @@
 """Prototype engineering resource loading report."""
 
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from collections import defaultdict
 from pathlib import Path
 
@@ -9,8 +9,11 @@ import pandas as pd
 
 
 ENGINEERING_START_DELAY_DAYS = 14
-numberEngineers = 2
-avgAppliedHoursPerDay = 6
+PO_RECEIVED_CUTOFF = date(2025, 1, 1)
+numberEngineers = 5
+avgAppliedHoursPerDay = 3
+EXCLUDED_SODET_KEYS = {"516039*001", "523187*001"}
+SALES_UNIT_DESCRIPTIONS = {"POWER SYSTEMS", "DEFENSE/GOVERNMENT"}
 
 
 def _add_working_days(start_date, working_days):
@@ -40,7 +43,7 @@ def _build_daily_engineering_schedule(start_date, dwg_release, sched_date, appli
 	return daily_schedule
 
 
-def calculate_schedule_fields(customer_project):
+def calculate_schedule_fields(customer_project, hours_field="TRUE_EngrHoursBudget"):
 	ord_date = date.fromisoformat(customer_project["ORD_DATE"])
 	sched_date = date.fromisoformat(customer_project["Sched_Date"])
 	if sched_date < ord_date:
@@ -51,9 +54,7 @@ def calculate_schedule_fields(customer_project):
 		for day_offset in range((sched_date - ord_date).days)
 		if (ord_date + timedelta(days=day_offset + 1)).weekday() < 5
 	)
-	applied_hours_per_day = (
-		customer_project["TRUE_EngrHoursBudget"] / duration / 1.15
-	)
+	applied_hours_per_day = customer_project[hours_field] / duration / 1.15
 	engineering_start_date = ord_date + timedelta(days=ENGINEERING_START_DELAY_DAYS)
 	bom_release = _add_working_days(ord_date, round(duration / 3))
 	dwg_release = _add_working_days(ord_date, round(duration * 2 / 3))
@@ -222,7 +223,7 @@ def build_iso_week_project_applied_hours(project_schedules):
 	]
 
 
-def plot_fiscal_week_project_workload(project_schedules, output_path):
+def plot_fiscal_week_project_workload(project_schedules, output_path, title):
 	import matplotlib.pyplot as plt
 
 	weekly_workload = build_iso_week_project_applied_hours(project_schedules)
@@ -313,22 +314,31 @@ def plot_fiscal_week_project_workload(project_schedules, output_path):
 			color="#666666",
 		)
 
-	axis.set_title("Engineering Workload by ISO Fiscal Week and Customer", fontsize=14)
+	axis.set_title(title, fontsize=14)
 	axis.set_xlabel("ISO Fiscal Week", fontsize=11)
 	axis.set_ylabel("Applied engineering hours", fontsize=11)
+	weekly_capacity = numberEngineers * avgAppliedHoursPerDay * 5
+	axis.axhline(
+		weekly_capacity,
+		color="#1f4e79",
+		linestyle="--",
+		linewidth=1.5,
+		label=f"Weekly capacity ({weekly_capacity:g} hours)",
+	)
 	axis.grid(True, axis="y", alpha=0.3)
 	axis.tick_params(axis="x", rotation=90, labelsize=8)
 	axis.tick_params(axis="y", labelsize=9)
 	axis.set_xticks(week_positions)
 	axis.set_xticklabels(weeks)
 	axis.margins(x=0.01)
-	axis.legend(
-		title="Customer",
-		loc="upper right",
-		frameon=False,
-		fontsize=8,
-		title_fontsize=9,
-	)
+	if customers:
+		axis.legend(
+			title="Customer",
+			loc="upper right",
+			frameon=False,
+			fontsize=8,
+			title_fontsize=9,
+		)
 	figure.subplots_adjust(left=0.07, right=0.98, bottom=0.2, top=0.9)
 
 	output_path = Path(output_path)
@@ -340,29 +350,58 @@ def plot_fiscal_week_project_workload(project_schedules, output_path):
 	return output_path
 
 
-REAL_PROJECTS_PATH = Path("C:/Users/mwoodmansee/OneDrive - Dynapower Company/OneDrive - Operations 26/PSE-project_engrHours.xlsx")
+REAL_PROJECTS_PATH = Path(r"J:\Department Metrics\AARC.COMBINED.GE.010123.xls")
+BACKLOG_CAPITAL_SHEET = "AARC RawData"
 
 
-def load_customer_projects(excel_path):
+def load_customer_projects(excel_path, sheet_name=None):
 	if not excel_path.exists():
 		raise FileNotFoundError(f"Workbook not found: {excel_path}")
 
-	df = pd.read_excel(excel_path)
+	read_kwargs = {"header": 1}
+	if sheet_name is not None:
+		read_kwargs["sheet_name"] = sheet_name
+	else:
+		read_kwargs["sheet_name"] = BACKLOG_CAPITAL_SHEET
+
+	df = pd.read_excel(excel_path, **read_kwargs)
 	df.columns = [str(column).strip() for column in df.columns]
+
+	status_col = "Line Status (Closed=I/P/N, Open=O)"
+	if status_col in df.columns:
+		df = df[df[status_col] == "O"].copy()
+	if "Sales Unit Desc" in df.columns:
+		df = df[df["Sales Unit Desc"].isin(SALES_UNIT_DESCRIPTIONS)].copy()
+
+	df = df.rename(columns={
+		"Customer": "customer",
+		"Sales Order/Line Number": "SODET_KEY",
+		"PO Received": "ORD_DATE",
+		"Sched Date": "Sched_Date",
+		"SALES BUDGET - Hours - Engineering": "TRUE_EngrHoursBudget",
+		"ALLOCATED - Hours - Engineering": "Allocated (hrs)",
+	})
 
 	projects = []
 	for row in df.to_dict(orient="records"):
-		job_name = row.get("Job Name")
-		sodet_key = row.get("Sodet Key")
-		sales_budget = pd.to_numeric(row.get("Sales Budget (hrs)"), errors="coerce")
-		ord_date = pd.to_datetime(row.get("ORD DATE"), errors="coerce")
-		sched_date = pd.to_datetime(row.get("Sched Date"), errors="coerce")
+		job_name = row.get("customer")
+		sodet_key = row.get("SODET_KEY")
+		sales_budget = pd.to_numeric(row.get("TRUE_EngrHoursBudget"), errors="coerce")
+		ord_date = pd.to_datetime(row.get("ORD_DATE"), errors="coerce")
+		sched_date = pd.to_datetime(row.get("Sched_Date"), errors="coerce")
+		allocated_hours = pd.to_numeric(row.get("Allocated (hrs)"), errors="coerce")
 
 		if pd.isna(sales_budget) or float(sales_budget) <= 10:
 			continue
 		if pd.isna(ord_date) or pd.isna(sched_date):
 			continue
+		if ord_date.date() < PO_RECEIVED_CUTOFF:
+			continue
+		if sched_date.date() < ord_date.date():
+			continue
 		if pd.isna(job_name) or pd.isna(sodet_key):
+			continue
+		if str(sodet_key).strip() in EXCLUDED_SODET_KEYS:
 			continue
 
 		projects.append(
@@ -371,7 +410,7 @@ def load_customer_projects(excel_path):
 				"SODET_KEY": str(sodet_key).strip(),
 				"ORD_DATE": ord_date.date().isoformat(),
 				"Sched_Date": sched_date.date().isoformat(),
-				"Allocated_hrs": row.get("Allocated (hrs)"),
+				"Allocated_hrs": None if pd.isna(allocated_hours) else float(allocated_hours),
 				"Actual_hrs": row.get("Actual (hrs)"),
 				"TRUE_EngrHoursBudget": float(sales_budget),
 				"GrossPrice": float(pd.to_numeric(row.get("Gross Price"), errors="coerce") or 0),
@@ -384,13 +423,25 @@ def load_customer_projects(excel_path):
 CUSTOMER_PROJECTS = load_customer_projects(REAL_PROJECTS_PATH)
 
 PROJECT_SCHEDULES = [calculate_schedule_fields(project) for project in CUSTOMER_PROJECTS]
+ALLOCATED_PROJECT_SCHEDULES = [
+	calculate_schedule_fields(project, "Allocated_hrs")
+	for project in CUSTOMER_PROJECTS
+	if project["Allocated_hrs"] is not None and project["Allocated_hrs"] > 10
+]
 TOTAL_DAILY_APPLIED_HOURS = build_total_daily_applied_hours(PROJECT_SCHEDULES)
 DAILY_NET_CAPACITY = build_daily_net_capacity(TOTAL_DAILY_APPLIED_HOURS)
 MONTHLY_PROJECT_APPLIED_HOURS = build_monthly_project_applied_hours(PROJECT_SCHEDULES)
 
 
 if __name__ == "__main__":
+	run_timestamp = datetime.now().strftime("%d-%b-%Y_%H-%M-%S")
 	plot_fiscal_week_project_workload(
 		PROJECT_SCHEDULES,
-		Path("engineering_resource_loading_by_fiscal_week.png"),
+		Path(f"PS-project-capacity_sales_budget_hours_{run_timestamp}.png"),
+		"Engineering Workload by ISO Fiscal Week and Customer - Sales Budget Hours",
+	)
+	plot_fiscal_week_project_workload(
+		ALLOCATED_PROJECT_SCHEDULES,
+		Path(f"PS-project-capacity_allocated_hours_{run_timestamp}.png"),
+		"Engineering Workload by ISO Fiscal Week and Customer - Allocated Hours",
 	)
