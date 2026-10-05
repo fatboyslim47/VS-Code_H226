@@ -73,6 +73,8 @@ SPECIFIC_PROJECT_IDS = [
 # line+bar chart per Task Id, placed directly below the parent project chart.
 TASK_BREAKDOWN_PROJECT_ID = 66389248
 TASK_BAR_COLOR = 'green'
+EMPLOYEE_ROSTER_PATH = Path(r'C:\Users\mwoodmansee\VS-Code_H126\employee_roster.csv')
+REPORT_TEAM = 'Clean Energy and R&D'
 
 CATEGORY_ORDER = ['ADMIN', 'NPD', 'SUPPORT', 'FIELD SVC']
 PROJECT_CATEGORY_BY_ID = {
@@ -254,6 +256,8 @@ def generate_project_pdf_report(
     task_total_hours_by_id: dict[int, float] | None = None,
     project_month_hours_by_id: dict[int, dict[str, float]] | None = None,
     project_month_labels: list[str] | None = None,
+    category_employee_percentages: pd.DataFrame | None = None,
+    category_employee_hours: pd.Series | None = None,
 ) -> bool:
     """Generate the mixed-orientation PDF report with totals in page titles."""
     output_dir = script_dir / 'output'
@@ -293,10 +297,6 @@ def generate_project_pdf_report(
     hours_chart = script_dir / f'{output_prefix}_category_hours_by_month_rev{latest_revision}.png'
     if hours_chart.exists():
         category_pages.append(('Monthly Hours by Category', hours_chart))
-    percent_chart = script_dir / f'{output_prefix}_category_percent_by_month_rev{latest_revision}.png'
-    if percent_chart.exists():
-        category_pages.append(('Monthly Category Share (100% Stacked)', percent_chart))
-
     if not category_pages and not ordered_images:
         print('No category or project PNG files found for PDF generation.')
         return False
@@ -370,6 +370,60 @@ def generate_project_pdf_report(
 
             for page_title, image_file in category_pages:
                 add_image_page(image_file, page_title, PDF_PAGE_SIZE_INCHES)
+
+            if category_employee_percentages is not None and not category_employee_percentages.empty:
+                percentage_fig = plt.figure(figsize=PDF_PAGE_SIZE_INCHES)
+                percentage_ax = percentage_fig.add_axes([0.04, 0.14, 0.92, 0.76])
+                percentage_ax.axis('off')
+                percentage_ax.set_title(
+                    f'{REPORT_TEAM} | Employee Category Allocation | Trailing 90 Days',
+                    fontsize=16,
+                    fontweight='bold',
+                    pad=18,
+                )
+                percentage_table = percentage_ax.table(
+                    cellText=[
+                        [category, *[
+                            f'{float(category_employee_percentages.loc[category, employee]):.1f}%'
+                            for employee in category_employee_percentages.columns
+                        ]]
+                        for category in CATEGORY_ORDER
+                    ] + [
+                        ['Total %', *[
+                            f'{float(category_employee_percentages.loc[CATEGORY_ORDER, employee].sum()):.1f}%'
+                            for employee in category_employee_percentages.columns
+                        ]]
+                    ] + [
+                        ['Total (hrs)', *[
+                            f'{float(category_employee_hours.get(employee, 0.0) if category_employee_hours is not None else 0.0):.1f}'
+                            for employee in category_employee_percentages.columns
+                        ]]
+                    ],
+                    colLabels=['Category', *category_employee_percentages.columns.tolist()],
+                    colWidths=[0.13] + [0.87 / len(category_employee_percentages.columns)] * len(category_employee_percentages.columns),
+                    cellLoc='center',
+                    colLoc='center',
+                    loc='center',
+                )
+                percentage_table.auto_set_font_size(False)
+                percentage_table.set_fontsize(8)
+                percentage_table.scale(1, 2.4)
+                for cell in percentage_table.get_celld().values():
+                    cell.set_edgecolor('#B8C2CC')
+                for column_index in range(len(category_employee_percentages.columns) + 1):
+                    percentage_table[0, column_index].set_facecolor('#264653')
+                    percentage_table[0, column_index].set_text_props(color='white', weight='bold')
+                for row_index, category in enumerate(CATEGORY_ORDER, start=1):
+                    percentage_table[row_index, 0].set_facecolor(CATEGORY_COLORS[category])
+                    percentage_table[row_index, 0].set_text_props(color='white', weight='bold')
+                for total_row_index in (len(CATEGORY_ORDER) + 1, len(CATEGORY_ORDER) + 2):
+                    for column_index in range(len(category_employee_percentages.columns) + 1):
+                        percentage_table[total_row_index, column_index].set_facecolor('#264653')
+                        percentage_table[total_row_index, column_index].set_text_props(color='white', weight='bold')
+                percentage_fig.text(0.5, 0.03, f'Page {page_num} | Executed: {executed_at}', ha='center', va='center', fontsize=9)
+                pdf.savefig(percentage_fig, orientation='landscape')
+                plt.close(percentage_fig)
+                page_num += 1
 
             for project_id, image_file in ordered_images:
                 page_size = PDF_PAGE_SIZE_PORTRAIT_INCHES if project_id in PDF_PORTRAIT_PROJECT_IDS else PDF_PAGE_SIZE_INCHES
@@ -902,7 +956,7 @@ def create_category_split_charts(
     latest_revision: int,
     file_prefix: str,
 ) -> None:
-    """Create monthly category split charts: absolute hours and 100% stacked percentage."""
+    """Create the monthly category hours chart."""
     if df_project_source.empty:
         print('No project rows available for category split charts.')
         return
@@ -991,15 +1045,47 @@ def create_category_split_charts(
     save_stacked_chart(pivot, hours_chart_file, 'Monthly Hours by Category', 'Hours (h)')
     print(f'Category hours chart saved to: {hours_chart_file}')
 
-    percent_chart_file = script_dir / f'{file_prefix}_category_percent_by_month_rev{latest_revision}.png'
-    save_stacked_chart(
-        percent_pivot,
-        percent_chart_file,
-        'Monthly Category Share (100% Stacked)',
-        'Monthly Category Share (%)',
-        normalized=True,
-    )
-    print(f'Category percent chart saved to: {percent_chart_file}')
+def calculate_category_employee_percentages(
+    df: pd.DataFrame,
+    employee_col: str | None,
+    project_ids: list[int],
+    employee_roster: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Calculate report-team category percentages and hours for the latest 90 days."""
+    if employee_col is None or 'Date' not in df.columns:
+        return pd.DataFrame(), pd.Series(dtype=float)
+
+    category_source = df[['Date', 'Project Id', 'Hours (h)', employee_col]].copy()
+    category_source['Date'] = pd.to_datetime(category_source['Date'], errors='coerce')
+    category_source['Project Id'] = pd.to_numeric(category_source['Project Id'], errors='coerce')
+    category_source['Hours (h)'] = pd.to_numeric(category_source['Hours (h)'], errors='coerce')
+    category_source = category_source.dropna(subset=['Date', 'Project Id', 'Hours (h)', employee_col])
+    category_source = category_source[category_source['Project Id'].isin(project_ids)].copy()
+    if category_source.empty:
+        return pd.DataFrame(), pd.Series(dtype=float)
+
+    if employee_roster is not None and 'Employee Number (Profile)' in df.columns:
+        roster_ids = pd.to_numeric(employee_roster['Avante ID'], errors='coerce')
+        team_ids = set(roster_ids[employee_roster['Team'].eq(REPORT_TEAM)].dropna().astype(int))
+        employee_profile_ids = pd.to_numeric(df.loc[category_source.index, 'Employee Number (Profile)'], errors='coerce')
+        category_source = category_source[employee_profile_ids.isin(team_ids)].copy()
+        if category_source.empty:
+            return pd.DataFrame(), pd.Series(dtype=float)
+
+    latest_date = category_source['Date'].max()
+    window_start = latest_date - pd.Timedelta(days=89)
+    category_source = category_source[category_source['Date'].between(window_start, latest_date)].copy()
+    category_source['Category'] = category_source['Project Id'].astype(int).map(PROJECT_CATEGORY_BY_ID)
+    category_source = category_source[category_source['Category'].isin(CATEGORY_ORDER)].copy()
+    if category_source.empty:
+        return pd.DataFrame(), pd.Series(dtype=float)
+
+    category_source[employee_col] = category_source[employee_col].astype(str)
+    hours_by_category = category_source.pivot_table(
+        index='Category', columns=employee_col, values='Hours (h)', aggfunc='sum', fill_value=0,
+    ).reindex(index=CATEGORY_ORDER, fill_value=0)
+    employee_totals = hours_by_category.sum(axis=0).replace(0, pd.NA).fillna(0).astype(float)
+    return hours_by_category.div(employee_totals.replace(0, pd.NA), axis=1).fillna(0) * 100, employee_totals
 
 
 def main() -> None:
@@ -1037,6 +1123,9 @@ def main() -> None:
 
     df_curated = prepare_curated_dataframe(df, employee_col)
     df_project_source = df_curated[df_curated['Project Id'].isin(SPECIFIC_PROJECT_IDS)].copy()
+    category_employee_percentages, category_employee_hours = calculate_category_employee_percentages(
+        df, employee_col, SPECIFIC_PROJECT_IDS, pd.read_csv(EMPLOYEE_ROSTER_PATH),
+    )
 
     df_project_grouped = (
         df_project_source.groupby(['Month', 'Project Id', 'Project'])['Hours (h)']
@@ -1238,6 +1327,8 @@ def main() -> None:
             task_total_hours_by_id=task_total_hours_by_id,
             project_month_hours_by_id=project_month_hours_by_id,
             project_month_labels=project_month_labels,
+            category_employee_percentages=category_employee_percentages,
+            category_employee_hours=category_employee_hours,
         )
         if render_succeeded and pdf_succeeded:
             delete_all_png_files(script_dir)

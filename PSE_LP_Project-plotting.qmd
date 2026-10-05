@@ -170,7 +170,7 @@ project_reference_rows = [
     {"Category": "SUPPORT", "Project": "SERVICE SUPPORT", "Code": "--", "Project Id": 65089745},
     {"Category": "SUPPORT", "Project": "CUSTOMER SUPPORT - AFTER SHIP", "Code": "--", "Project Id": 51842016},
     {"Category": "ADMIN", "Project": "RMA SUPPORT", "Code": "--", "Project Id": 68661669},
-    {"Category": "ADMIN", "Project": "ENGX | GENERAL LABOR HRS", "Code": "--", "Project Id": 57518175},
+    {"Category": "SUPPORT", "Project": "ENGX | GENERAL LABOR HRS", "Code": "--", "Project Id": 57518175},
     {"Category": "SUPPORT", "Project": "PRODUCT LINE - SUPPORT", "Code": "--", "Project Id": 57163983},
     {"Category": "ADMIN", "Project": "ENGM | ENGINEERING MANAGEMENT", "Code": "--", "Project Id": 57141713},
     {"Category": "ADMIN", "Project": "TRAINING AND GOALS | TRN", "Code": "--", "Project Id": 57164010},
@@ -362,7 +362,6 @@ else:
 
     category_chart_specs = [
         (f"{asset_prefix}category_hours_by_month_rev{latest_revision}.png", "Monthly Hours by Category"),
-        (f"{asset_prefix}category_percent_by_month_rev{latest_revision}.png", "Monthly Category Share (100% Stacked)"),
     ]
     for chart_file_name, chart_title in category_chart_specs:
         chart_file = (asset_dir or script_dir) / chart_file_name

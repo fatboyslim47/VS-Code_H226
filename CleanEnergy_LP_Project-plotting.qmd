@@ -313,7 +313,6 @@ else:
 
     category_chart_specs = [
         (f"{asset_prefix}category_hours_by_month_rev{latest_revision}.png", "Monthly Hours by Category"),
-        (f"{asset_prefix}category_percent_by_month_rev{latest_revision}.png", "Monthly Category Share (100% Stacked)"),
     ]
     for chart_file_name, chart_title in category_chart_specs:
         chart_file = (asset_dir or script_dir) / chart_file_name
