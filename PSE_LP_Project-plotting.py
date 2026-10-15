@@ -48,6 +48,11 @@ TASK_ID_MERGE_MAP: dict[int, int] = {}
 
 REQUIRED_COLUMNS = ['Month', 'Task Id', 'Task', 'Project Id', 'Project', 'Hours (h)']
 EMPLOYEE_COLUMN_CANDIDATES = ['Employee', 'Employee Name', 'Assignee', 'User', 'Person', 'Resource', 'Member', 'For']
+TIMESHEET_INPUT_COLUMNS = (
+    set(REQUIRED_COLUMNS)
+    | set(EMPLOYEE_COLUMN_CANDIDATES)
+    | {'Date', 'Employee Number (Profile)'}
+)
 SPECIFIC_PROJECT_IDS = [
     60372899,
     57163926,
@@ -606,6 +611,15 @@ def format_month_label(value: str) -> str:
 def find_latest_timesheet_export(script_dir: Path) -> tuple[int, Path, int]:
     """Find the latest timesheet export revision file in the script directory."""
     pattern = re.compile(r'^timesheet_export \((\d+)\)\.xlsx$', re.IGNORECASE)
+    configured_export = os.environ.get('LP_TIMESHEET_EXPORT_PATH')
+    if configured_export:
+        configured_path = Path(configured_export)
+        if not configured_path.is_file():
+            raise FileNotFoundError(f'Configured timesheet export not found: {configured_path}')
+        match = pattern.fullmatch(configured_path.name)
+        revision_number = int(match.group(1)) if match else 0
+        return revision_number, configured_path, 1
+
     matching_files: list[tuple[int, Path]] = []
 
     for file in script_dir.glob('timesheet_export*.xlsx'):
@@ -1169,7 +1183,11 @@ def main() -> None:
     print(f'Found {file_count} timesheet_export file(s)')
     print(f'Opening latest revision: {latest_file.name} (revision {latest_revision})')
 
-    df = pd.read_excel(latest_file, header=0)
+    df = pd.read_excel(
+        latest_file,
+        header=0,
+        usecols=lambda column: column in TIMESHEET_INPUT_COLUMNS,
+    )
 
     print(f'\nLoaded {len(df)} rows and {len(df.columns)} columns')
     print(f'\nColumns: {list(df.columns)}')
